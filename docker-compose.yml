@@ -46,7 +46,9 @@ services:
       - MAX_CLIENT_CONN=10000
       - DEFAULT_POOL_SIZE=20
       - ADMIN_USERS=${DB_USER:-cascata_admin}
-      - AUTH_TYPE=md5
+      # CRITICAL FIX: Postgres 15 uses SCRAM-SHA-256 by default.
+      # MD5 causing 08P01 errors.
+      - AUTH_TYPE=scram-sha-256
       - AUTH_QUERY=SELECT usename, passwd FROM pg_shadow WHERE usename=$1
       - IGNORE_STARTUP_PARAMETERS=extra_float_digits,binary_as_text
     depends_on:
@@ -73,7 +75,7 @@ services:
       - DB_DIRECT_PORT=5432
       - DB_POOL_HOST=pgbouncer
       - DB_POOL_PORT=6432
-      # CRITICAL AUTH FIXES
+      # CRITICAL AUTH INJECTION
       - DB_USER=${DB_USER}
       - DB_PASS=${DB_PASS}
       # Path Fixes
@@ -116,7 +118,7 @@ services:
       - DB_DIRECT_PORT=5432
       - DB_POOL_HOST=pgbouncer
       - DB_POOL_PORT=6432
-      # CRITICAL AUTH FIXES
+      # CRITICAL AUTH INJECTION
       - DB_USER=${DB_USER}
       - DB_PASS=${DB_PASS}
       # Path Fixes

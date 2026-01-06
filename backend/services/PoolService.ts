@@ -16,8 +16,8 @@ interface PoolEntry {
 }
 
 /**
- * PoolService v3.0 (PgBouncer Enabled)
- * Gerencia conexões otimizadas para alta escala.
+ * PoolService v3.1 (PgBouncer Optimized)
+ * Gerencia conexões otimizadas para alta escala com suporte a SCRAM-SHA-256 e KeepAlive.
  */
 export class PoolService {
   private static pools = new Map<string, PoolEntry>();
@@ -80,7 +80,7 @@ export class PoolService {
 
     const requestedMax = config?.max || 10;
     
-    // Connection Cap Logic (Opcional se confiar 100% no PgBouncer, mas bom manter para segurança do Node)
+    // Connection Cap Logic
     const currentTotal = this.getTotalAllocatedConnections();
     if (currentTotal + requestedMax > this.GLOBAL_CONNECTION_CAP) {
         this.reapZombies(requestedMax);
@@ -101,15 +101,20 @@ export class PoolService {
 
     const statementTimeout = config?.statementTimeout || this.DEFAULT_STATEMENT_TIMEOUT;
 
+    // Identifica a conexão no pg_stat_activity
+    const appName = `cascata-${process.env.SERVICE_MODE || 'api'}-${usePooler ? 'pool' : 'direct'}`;
+
     const poolConfig = {
       connectionString: dbUrl,
       max: requestedMax,
       idleTimeoutMillis: config?.idleTimeoutMillis || 60000,
-      connectionTimeoutMillis: config?.connectionTimeoutMillis || 5000,
-      keepAlive: true
+      connectionTimeoutMillis: config?.connectionTimeoutMillis || 10000, // Aumentado para evitar timeouts prematuros no handshake
+      keepAlive: true,
+      application_name: appName,
+      // SSL mode settings if needed in future, currently internal network is trusted
     };
 
-    console.log(`[PoolService] Init ${key} -> ${host}:${port}`);
+    console.log(`[PoolService] Init ${key} -> ${host}:${port} (${appName})`);
 
     const pool = new Pool(poolConfig);
 
