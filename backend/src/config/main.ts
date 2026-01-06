@@ -11,7 +11,7 @@ const { Pool } = pg;
 // --- ROBUST PATH RESOLUTION ---
 // Em vez de depender de __dirname (que muda se estamos em /src ou /dist),
 // usamos process.cwd() que no Docker é sempre /app.
-const APP_ROOT = process.cwd();
+const APP_ROOT = path.resolve('.');
 
 // Prioriza variáveis de ambiente definidas no Docker, fallback para estrutura local padrão
 export const STORAGE_ROOT = process.env.STORAGE_ROOT || path.resolve(APP_ROOT, '../storage');

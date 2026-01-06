@@ -17,6 +17,7 @@ const Dashboard: React.FC<DashboardProps> = ({ onSelectProject }) => {
   // Create Modal
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [newProject, setNewProject] = useState({ name: '', slug: '' });
+  const [createError, setCreateError] = useState<string | null>(null);
   
   // Import Modal
   const [showImportModal, setShowImportModal] = useState(false);
@@ -48,9 +49,24 @@ const Dashboard: React.FC<DashboardProps> = ({ onSelectProject }) => {
 
   useEffect(() => { fetchProjects(); }, []);
 
+  const handleNameChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+      const name = e.target.value;
+      // Auto-generate slug from name
+      const slug = name.toLowerCase()
+          .normalize("NFD").replace(/[\u0300-\u036f]/g, "") // Remove accents
+          .replace(/\s+/g, '-')     // spaces to -
+          .replace(/[^a-z0-9-]/g, '') // remove invalid chars
+          .replace(/--+/g, '-')     // collapse dashes
+          .replace(/^-+/, '')       // trim start
+          .replace(/-+$/, '');      // trim end
+      
+      setNewProject({ name, slug });
+  };
+
   const handleCreateProject = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoading(true);
+    setCreateError(null);
     try {
       const response = await fetch('/api/control/projects', {
         method: 'POST',
@@ -60,13 +76,18 @@ const Dashboard: React.FC<DashboardProps> = ({ onSelectProject }) => {
         },
         body: JSON.stringify(newProject),
       });
+      
+      const data = await response.json();
+      
       if (response.ok) {
         setShowCreateModal(false);
         setNewProject({ name: '', slug: '' });
         fetchProjects();
+      } else {
+        setCreateError(data.error || "Failed to create project");
       }
-    } catch (err) {
-      console.error('Provisioning engine failed');
+    } catch (err: any) {
+      setCreateError(err.message || "Network Error");
     } finally {
       setLoading(false);
     }
@@ -213,15 +234,21 @@ const Dashboard: React.FC<DashboardProps> = ({ onSelectProject }) => {
               <Server size={32} />
             </div>
             <h2 className="text-3xl font-black text-slate-900 mb-4 tracking-tighter">New Infrastructure</h2>
-            <p className="text-slate-500 mb-10 text-sm font-medium leading-relaxed">Creating a new project will provision a dedicated PostgreSQL database and generate unique service keys.</p>
+            <p className="text-slate-500 mb-8 text-sm font-medium leading-relaxed">Creating a new project will provision a dedicated PostgreSQL database and generate unique service keys.</p>
             
+            {createError && (
+              <div className="mb-6 p-4 bg-rose-50 border border-rose-100 rounded-2xl flex items-center gap-3 text-rose-600 text-xs font-bold animate-in slide-in-from-top-2">
+                  <AlertTriangle size={16} className="shrink-0" /> {createError}
+              </div>
+            )}
+
             <form onSubmit={handleCreateProject} className="space-y-6">
               <div className="space-y-2">
                 <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1">Instance Name</label>
                 <input 
                   type="text" 
                   value={newProject.name}
-                  onChange={(e) => setNewProject({...newProject, name: e.target.value})}
+                  onChange={handleNameChange}
                   className="w-full bg-slate-50 border border-slate-100 rounded-3xl py-4 px-6 focus:outline-none focus:ring-4 focus:ring-indigo-500/10 text-lg font-bold text-slate-900 placeholder:text-slate-300 transition-all"
                   placeholder="App Production"
                   required
@@ -235,7 +262,7 @@ const Dashboard: React.FC<DashboardProps> = ({ onSelectProject }) => {
                   <input 
                     type="text" 
                     value={newProject.slug}
-                    onChange={(e) => setNewProject({...newProject, slug: e.target.value.toLowerCase().replace(/ /g, '-').replace(/[^a-z0-9-]/g, '')})}
+                    onChange={(e) => setNewProject({...newProject, slug: e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, '')})}
                     className="w-full bg-slate-50 border border-slate-100 rounded-3xl py-4 pl-14 pr-6 focus:outline-none focus:ring-4 focus:ring-indigo-500/10 font-mono text-sm font-bold text-indigo-600"
                     placeholder="my-saas-infra"
                     required
@@ -248,7 +275,7 @@ const Dashboard: React.FC<DashboardProps> = ({ onSelectProject }) => {
                 <button 
                    type="submit" 
                    disabled={loading}
-                   className="flex-[2] py-4 bg-indigo-600 text-white font-black rounded-3xl shadow-xl shadow-indigo-500/30 hover:bg-indigo-700 transition-all uppercase tracking-widest text-xs flex items-center justify-center gap-3 active:scale-95"
+                   className="flex-[2] py-4 bg-indigo-600 text-white font-black rounded-3xl shadow-xl shadow-indigo-500/30 hover:bg-indigo-700 transition-all uppercase tracking-widest text-xs flex items-center justify-center gap-3 active:scale-95 disabled:opacity-50"
                 >
                   {loading ? <Loader2 size={18} className="animate-spin" /> : 'Provision Architecture'}
                 </button>

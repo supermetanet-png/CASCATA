@@ -73,6 +73,9 @@ services:
       - DB_DIRECT_PORT=5432
       - DB_POOL_HOST=pgbouncer
       - DB_POOL_PORT=6432
+      # CRITICAL AUTH FIXES
+      - DB_USER=${DB_USER}
+      - DB_PASS=${DB_PASS}
       # Path Fixes
       - STORAGE_ROOT=/cascata/storage
       - MIGRATIONS_ROOT=/app/migrations
@@ -113,6 +116,9 @@ services:
       - DB_DIRECT_PORT=5432
       - DB_POOL_HOST=pgbouncer
       - DB_POOL_PORT=6432
+      # CRITICAL AUTH FIXES
+      - DB_USER=${DB_USER}
+      - DB_PASS=${DB_PASS}
       # Path Fixes
       - STORAGE_ROOT=/cascata/storage
       - MIGRATIONS_ROOT=/app/migrations

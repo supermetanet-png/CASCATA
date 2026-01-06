@@ -7,7 +7,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 export default defineConfig(({ mode }) => {
   // Carrega variáveis de ambiente do nível atual ou da raiz, se necessário
-  const env = loadEnv(mode, process.cwd(), '');
+  const env = loadEnv(mode, path.resolve('.'), '');
 
   return {
     plugins: [react()],
