@@ -9,7 +9,7 @@ import { StorageService, StorageConfig } from '../../services/StorageService.js'
 
 export class StorageController {
 
-    static async listBuckets(req: CascataRequest, res: any, next: NextFunction) {
+    static async listBuckets(req: CascataRequest, res: any, next: any) {
         try {
             const p = path.join(STORAGE_ROOT, req.project.slug);
             await fs.mkdir(p, { recursive: true });
@@ -25,7 +25,7 @@ export class StorageController {
         }
     }
 
-    static async createBucket(req: CascataRequest, res: any, next: NextFunction) {
+    static async createBucket(req: CascataRequest, res: any, next: any) {
         try {
             const p = path.join(STORAGE_ROOT, req.project.slug, req.body.name);
             await fs.mkdir(p, { recursive: true });
@@ -35,7 +35,7 @@ export class StorageController {
         }
     }
 
-    static async renameBucket(req: CascataRequest, res: any, next: NextFunction) {
+    static async renameBucket(req: CascataRequest, res: any, next: any) {
         try {
             const oldPath = path.join(STORAGE_ROOT, req.project.slug, req.params.name);
             const newPath = path.join(STORAGE_ROOT, req.project.slug, req.body.newName);
@@ -53,7 +53,7 @@ export class StorageController {
         }
     }
 
-    static async deleteBucket(req: CascataRequest, res: any, next: NextFunction) {
+    static async deleteBucket(req: CascataRequest, res: any, next: any) {
         try {
             const bucketPath = path.join(STORAGE_ROOT, req.project.slug, req.params.name);
             if (!bucketPath.startsWith(path.join(STORAGE_ROOT, req.project.slug))) { 
@@ -66,7 +66,7 @@ export class StorageController {
         }
     }
 
-    static async createFolder(req: CascataRequest, res: any, next: NextFunction) {
+    static async createFolder(req: CascataRequest, res: any, next: any) {
         try {
             const { name, path: relativePath } = req.body;
             const bucketPath = path.join(STORAGE_ROOT, req.project.slug, req.params.bucket);
@@ -89,7 +89,7 @@ export class StorageController {
     // --- HYBRID UPLOAD SYSTEM ---
     
     // 1. Negotiation Phase: "Can I upload this?"
-    static async signUpload(req: CascataRequest, res: any, next: NextFunction) {
+    static async signUpload(req: CascataRequest, res: any, next: any) {
         try {
             const { name, type, size, path: targetPath } = req.body;
             
@@ -133,7 +133,7 @@ export class StorageController {
     }
 
     // 2. Execution Phase (Proxy Fallback)
-    static async uploadFile(req: CascataRequest, res: any, next: NextFunction) {
+    static async uploadFile(req: CascataRequest, res: any, next: any) {
         if (!req.file) return res.status(400).json({ error: 'No file found in request body.' });
         
         const cleanup = async () => { try { await fs.unlink(req.file.path); } catch(e) {} };
@@ -191,7 +191,7 @@ export class StorageController {
         }
     }
 
-    static async listFiles(req: CascataRequest, res: any, next: NextFunction) {
+    static async listFiles(req: CascataRequest, res: any, next: any) {
         const { path: queryPath } = req.query;
         const bucketPath = path.join(STORAGE_ROOT, req.project.slug, req.params.bucket);
         const targetPath = path.normalize(path.join(bucketPath, (queryPath as string) || ''));
@@ -222,7 +222,7 @@ export class StorageController {
         } catch (e: any) { next(e); }
     }
 
-    static async search(req: CascataRequest, res: any, next: NextFunction) {
+    static async search(req: CascataRequest, res: any, next: any) {
         const { q, bucket } = req.query;
         const searchTerm = (q as string || '').toLowerCase();
         const projectRoot = path.join(STORAGE_ROOT, req.project.slug);
@@ -243,7 +243,7 @@ export class StorageController {
         }
     }
 
-    static async serveFile(req: CascataRequest, res: any, next: NextFunction) {
+    static async serveFile(req: CascataRequest, res: any, next: any) {
         const relativePath = req.params[0];
         const storageConfig: StorageConfig = req.project.metadata?.storage_config || { provider: 'local' };
         
@@ -267,7 +267,7 @@ export class StorageController {
         catch { res.status(404).json({ error: 'File Not Found' }); }
     }
 
-    static async moveFiles(req: CascataRequest, res: any, next: NextFunction) {
+    static async moveFiles(req: CascataRequest, res: any, next: any) {
         const storageConfig: StorageConfig = req.project.metadata?.storage_config || { provider: 'local' };
         if (storageConfig.provider !== 'local') return res.status(501).json({ error: "Move operation not supported for external providers yet." });
 
@@ -287,7 +287,7 @@ export class StorageController {
         } catch (e: any) { next(e); }
     }
 
-    static async deleteObject(req: CascataRequest, res: any, next: NextFunction) {
+    static async deleteObject(req: CascataRequest, res: any, next: any) {
         const storageConfig: StorageConfig = req.project.metadata?.storage_config || { provider: 'local' };
         const objectPath = req.query.path as string;
 

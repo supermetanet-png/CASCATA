@@ -6,7 +6,7 @@ import { AiService } from '../../services/AiService.js';
 import { OpenApiService } from '../../services/OpenApiService.js';
 
 export class AiController {
-    static async listSessions(req: CascataRequest, res: any, next: NextFunction) {
+    static async listSessions(req: CascataRequest, res: any, next: any) {
         try {
             const result = await systemPool.query(
                 `SELECT * FROM system.ai_sessions WHERE project_slug = $1 ORDER BY updated_at DESC`,
@@ -16,7 +16,7 @@ export class AiController {
         } catch (e: any) { next(e); }
     }
 
-    static async updateSession(req: CascataRequest, res: any, next: NextFunction) {
+    static async updateSession(req: CascataRequest, res: any, next: any) {
         try {
             await systemPool.query(
                 `UPDATE system.ai_sessions SET title = $1, updated_at = NOW() WHERE id = $2 AND project_slug = $3`,
@@ -26,7 +26,7 @@ export class AiController {
         } catch (e: any) { next(e); }
     }
 
-    static async searchSessions(req: CascataRequest, res: any, next: NextFunction) {
+    static async searchSessions(req: CascataRequest, res: any, next: any) {
         const { query } = req.body;
         if (!query) return res.json([]);
         try {
@@ -44,7 +44,7 @@ export class AiController {
         } catch (e: any) { next(e); }
     }
 
-    static async chat(req: CascataRequest, res: any, next: NextFunction) {
+    static async chat(req: CascataRequest, res: any, next: any) {
         try {
             const settingsRes = await systemPool.query("SELECT settings FROM system.ui_settings WHERE project_slug = '_system_root_' AND table_name = 'ai_config'");
             const { session_id, messages } = req.body;
@@ -72,7 +72,7 @@ export class AiController {
         } catch (e: any) { next(e); }
     }
 
-    static async getHistory(req: CascataRequest, res: any, next: NextFunction) {
+    static async getHistory(req: CascataRequest, res: any, next: any) {
         try { 
             const result = await systemPool.query("SELECT role, content, created_at FROM system.ai_history WHERE project_slug = $1 AND session_id = $2 ORDER BY created_at ASC", [req.project.slug, req.params.session_id]); 
             res.json(result.rows); 
@@ -80,7 +80,7 @@ export class AiController {
     }
 
     // --- UTILS & DOCS ---
-    static async fixSql(req: CascataRequest, res: any, next: NextFunction) {
+    static async fixSql(req: CascataRequest, res: any, next: any) {
         try {
             const settingsRes = await systemPool.query("SELECT settings FROM system.ui_settings WHERE project_slug = '_system_root_' AND table_name = 'ai_config'");
             const fixedSql = await AiService.fixSQL(req.project.slug, req.projectPool!, settingsRes.rows[0]?.settings || {}, req.body.sql, req.body.error);
@@ -88,7 +88,7 @@ export class AiController {
         } catch (e: any) { next(e); }
     }
 
-    static async explain(req: CascataRequest, res: any, next: NextFunction) {
+    static async explain(req: CascataRequest, res: any, next: any) {
         try {
             const settingsRes = await systemPool.query("SELECT settings FROM system.ui_settings WHERE project_slug = '_system_root_' AND table_name = 'ai_config'");
             const result = await AiService.explainCode(req.project.slug, req.projectPool!, settingsRes.rows[0]?.settings || {}, req.body.code, req.body.type || 'sql');
@@ -96,11 +96,11 @@ export class AiController {
         } catch (e: any) { next(e); }
     }
 
-    static async listDocPages(req: CascataRequest, res: any, next: NextFunction) {
+    static async listDocPages(req: CascataRequest, res: any, next: any) {
         try { const result = await systemPool.query('SELECT * FROM system.doc_pages WHERE project_slug = $1 ORDER BY title ASC', [req.project.slug]); res.json(result.rows); } catch (e: any) { next(e); }
     }
 
-    static async draftDoc(req: CascataRequest, res: any, next: NextFunction) {
+    static async draftDoc(req: CascataRequest, res: any, next: any) {
         try {
             const settingsRes = await systemPool.query("SELECT settings FROM system.ui_settings WHERE project_slug = '_system_root_' AND table_name = 'ai_config'");
             const doc = await AiService.draftDoc(req.project.slug, req.projectPool!, settingsRes.rows[0]?.settings || {}, req.body.tableName);
@@ -109,7 +109,7 @@ export class AiController {
         } catch (e: any) { next(e); }
     }
 
-    static async getOpenApiSpec(req: CascataRequest, res: any, next: NextFunction) {
+    static async getOpenApiSpec(req: CascataRequest, res: any, next: any) {
         try { 
             // Pass systemPool to enable reading Edge Functions from system tables
             const spec = await OpenApiService.generate(

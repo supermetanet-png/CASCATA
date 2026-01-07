@@ -4,6 +4,7 @@ import crypto from 'crypto';
 import { CascataRequest } from '../src/types.js';
 import { PoolService } from './PoolService.js';
 import { IngressEngine, IngressStep } from './IngressEngine.js';
+import { Buffer } from 'buffer';
 
 interface IngressSecurityConfig {
     verify_signature: boolean;

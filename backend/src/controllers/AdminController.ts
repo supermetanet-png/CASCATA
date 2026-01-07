@@ -19,7 +19,7 @@ const generateKey = () => import('crypto').then(c => c.randomBytes(32).toString(
 export class AdminController {
     
     // ... (Métodos de login e projeto mantidos para integridade) ...
-    static async login(req: CascataRequest, res: any, next: NextFunction) {
+    static async login(req: CascataRequest, res: any, next: any) {
         const { email, password } = req.body;
         try {
             const result = await systemPool.query('SELECT * FROM system.admin_users WHERE email = $1', [email]);
@@ -45,7 +45,7 @@ export class AdminController {
         } catch (e: any) { next(e); }
     }
 
-    static async verify(req: CascataRequest, res: any, next: NextFunction) {
+    static async verify(req: CascataRequest, res: any, next: any) {
         try {
             const user = (await systemPool.query('SELECT * FROM system.admin_users LIMIT 1')).rows[0];
             let isValid = false;
@@ -57,7 +57,7 @@ export class AdminController {
         } catch (e: any) { next(e); }
     }
 
-    static async updateProfile(req: CascataRequest, res: any, next: NextFunction) {
+    static async updateProfile(req: CascataRequest, res: any, next: any) {
         const { email, password } = req.body;
         try {
             let passwordHash = undefined;
@@ -71,14 +71,14 @@ export class AdminController {
         } catch (e: any) { next(e); }
     }
 
-    static async listProjects(req: CascataRequest, res: any, next: NextFunction) {
+    static async listProjects(req: CascataRequest, res: any, next: any) {
         try { 
             const result = await systemPool.query("SELECT id, name, slug, db_name, custom_domain, ssl_certificate_source, blocklist, metadata, status, created_at, '******' as jwt_secret, pgp_sym_decrypt(anon_key::bytea, $1) as anon_key, '******' as service_key FROM system.projects ORDER BY created_at DESC", [SYS_SECRET]); 
             res.json(result.rows); 
         } catch (e: any) { next(e); }
     }
 
-    static async createProject(req: CascataRequest, res: any, next: NextFunction) {
+    static async createProject(req: CascataRequest, res: any, next: any) {
         const { name, slug } = req.body;
         const safeSlug = slug.toLowerCase().replace(/[^a-z0-9-]/g, '');
         const dbName = `cascata_db_${safeSlug.replace(/-/g, '_')}`;
@@ -107,7 +107,7 @@ export class AdminController {
         }
     }
 
-    static async updateProject(req: CascataRequest, res: any, next: NextFunction) {
+    static async updateProject(req: CascataRequest, res: any, next: any) {
         try {
             const { custom_domain, log_retention_days, metadata, ssl_certificate_source } = req.body;
             const safeDomain = custom_domain === null ? null : (custom_domain ? custom_domain.trim().toLowerCase() : undefined);
@@ -145,7 +145,7 @@ export class AdminController {
         } catch (e: any) { next(e); }
     }
 
-    static async deleteProject(req: CascataRequest, res: any, next: NextFunction) {
+    static async deleteProject(req: CascataRequest, res: any, next: any) {
         const { slug } = req.params;
         try {
             const project = (await systemPool.query('SELECT * FROM system.projects WHERE slug = $1', [slug])).rows[0];
@@ -168,7 +168,7 @@ export class AdminController {
         } catch (e: any) { next(e); }
     }
 
-    static async revealKey(req: CascataRequest, res: any, next: NextFunction) {
+    static async revealKey(req: CascataRequest, res: any, next: any) {
         const { password, keyType } = req.body;
         try {
             const admin = (await systemPool.query('SELECT * FROM system.admin_users LIMIT 1')).rows[0];
@@ -181,13 +181,13 @@ export class AdminController {
         } catch (e: any) { next(e); }
     }
 
-    static async rotateKeys(req: CascataRequest, res: any, next: NextFunction) {
+    static async rotateKeys(req: CascataRequest, res: any, next: any) {
         const { type } = req.body;
         const col = type === 'anon' ? 'anon_key' : type === 'service' ? 'service_key' : 'jwt_secret';
         try { await systemPool.query(`UPDATE system.projects SET ${col} = pgp_sym_encrypt($1, $3) WHERE slug = $2`, [await generateKey(), req.params.slug, SYS_SECRET]); res.json({ success: true }); } catch (e: any) { next(e); }
     }
 
-    static async updateSecrets(req: CascataRequest, res: any, next: NextFunction) {
+    static async updateSecrets(req: CascataRequest, res: any, next: any) {
         const { secrets } = req.body;
         try {
             await systemPool.query(
@@ -198,22 +198,22 @@ export class AdminController {
         } catch (e: any) { next(e); }
     }
 
-    static async blockIp(req: CascataRequest, res: any, next: NextFunction) {
+    static async blockIp(req: CascataRequest, res: any, next: any) {
         try { await systemPool.query('UPDATE system.projects SET blocklist = array_append(blocklist, $1) WHERE slug = $2', [req.body.ip, req.params.slug]); res.json({ success: true }); } catch (e: any) { next(e); }
     }
 
-    static async unblockIp(req: CascataRequest, res: any, next: NextFunction) {
+    static async unblockIp(req: CascataRequest, res: any, next: any) {
         try { await systemPool.query('UPDATE system.projects SET blocklist = array_remove(blocklist, $1) WHERE slug = $2', [req.params.ip, req.params.slug]); res.json({ success: true }); } catch (e: any) { next(e); }
     }
 
-    static async purgeLogs(req: CascataRequest, res: any, next: NextFunction) {
+    static async purgeLogs(req: CascataRequest, res: any, next: any) {
         try { 
             await systemPool.query(`SELECT system.purge_old_logs($1, $2)`, [req.params.slug, Number(req.query.days)]); 
             res.json({ success: true }); 
         } catch (e: any) { next(e); }
     }
 
-    static async exportProject(req: CascataRequest, res: any, next: NextFunction) {
+    static async exportProject(req: CascataRequest, res: any, next: any) {
         try {
             const project = (await systemPool.query('SELECT * FROM system.projects WHERE slug = $1', [req.params.slug])).rows[0];
             if (!project) return res.status(404).json({ error: 'Project not found' });
@@ -223,7 +223,7 @@ export class AdminController {
         }
     }
 
-    static async uploadImport(req: CascataRequest, res: any, next: NextFunction) {
+    static async uploadImport(req: CascataRequest, res: any, next: any) {
         if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
         try {
             const manifest = await ImportService.validateBackup(req.file.path);
@@ -234,7 +234,7 @@ export class AdminController {
         }
     }
 
-    static async confirmImport(req: CascataRequest, res: any, next: NextFunction) {
+    static async confirmImport(req: CascataRequest, res: any, next: any) {
         const { temp_path, slug } = req.body;
         if (!temp_path || !slug) return res.status(400).json({ error: 'Missing parameters' });
         try {
@@ -244,7 +244,7 @@ export class AdminController {
         } catch (e: any) { next(e); }
     }
 
-    static async getSystemSettings(req: CascataRequest, res: any, next: NextFunction) {
+    static async getSystemSettings(req: CascataRequest, res: any, next: any) {
         try {
             const domainRes = await systemPool.query("SELECT settings->>'domain' as domain FROM system.ui_settings WHERE project_slug = '_system_root_' AND table_name = 'domain_config'");
             const aiRes = await systemPool.query("SELECT settings as ai_config FROM system.ui_settings WHERE project_slug = '_system_root_' AND table_name = 'ai_config'");
@@ -258,7 +258,7 @@ export class AdminController {
         } catch (e: any) { next(e); }
     }
 
-    static async updateSystemSettings(req: CascataRequest, res: any, next: NextFunction) {
+    static async updateSystemSettings(req: CascataRequest, res: any, next: any) {
         const { domain, ai_config, db_config } = req.body;
         try {
             if (domain !== undefined) {
@@ -278,18 +278,18 @@ export class AdminController {
         } catch (e: any) { next(e); }
     }
 
-    static async checkSsl(req: CascataRequest, res: any, next: NextFunction) {
+    static async checkSsl(req: CascataRequest, res: any, next: any) {
         try { res.json({ status: 'active' }); } catch (e: any) { next(e); }
     }
 
-    static async listCertificates(req: CascataRequest, res: any, next: NextFunction) {
+    static async listCertificates(req: CascataRequest, res: any, next: any) {
         try {
             const domains = await CertificateService.listAvailableCerts();
             res.json({ domains });
         } catch (e: any) { next(e); }
     }
 
-    static async createCertificate(req: CascataRequest, res: any, next: NextFunction) {
+    static async createCertificate(req: CascataRequest, res: any, next: any) {
         const { domain, email, provider, cert, key } = req.body;
         try {
             const result = await CertificateService.requestCertificate(domain, email, provider, systemPool, { cert, key });
@@ -297,7 +297,7 @@ export class AdminController {
         } catch (e: any) { res.status(500).json({ error: e.message }); }
     }
 
-    static async deleteCertificate(req: CascataRequest, res: any, next: NextFunction) {
+    static async deleteCertificate(req: CascataRequest, res: any, next: any) {
         try {
             await CertificateService.deleteCertificate(req.params.domain, systemPool);
             res.json({ success: true });
@@ -306,7 +306,7 @@ export class AdminController {
 
     // --- UPDATED WEBHOOK METHODS ---
 
-    static async testWebhook(req: CascataRequest, res: any, next: NextFunction) {
+    static async testWebhook(req: CascataRequest, res: any, next: any) {
         const { payload } = req.body;
         try {
             const hook = (await systemPool.query('SELECT * FROM system.webhooks WHERE id = $1', [req.params.id])).rows[0];
@@ -323,11 +323,11 @@ export class AdminController {
         } catch(e: any) { next(e); }
     }
     
-    static async listWebhooks(req: CascataRequest, res: any, next: NextFunction) {
+    static async listWebhooks(req: CascataRequest, res: any, next: any) {
         try { const result = await systemPool.query('SELECT * FROM system.webhooks WHERE project_slug = $1 ORDER BY created_at DESC', [req.params.slug]); res.json(result.rows); } catch (e: any) { next(e); }
     }
 
-    static async createWebhook(req: CascataRequest, res: any, next: NextFunction) {
+    static async createWebhook(req: CascataRequest, res: any, next: any) {
         const { target_url, event_type, table_name, filters, fallback_url, retry_policy } = req.body; // Added new fields
         try {
             const projectRes = await systemPool.query("SELECT pgp_sym_decrypt(jwt_secret::bytea, $1) as jwt_secret FROM system.projects WHERE slug = $2", [SYS_SECRET, req.params.slug]);
@@ -341,14 +341,14 @@ export class AdminController {
         } catch (e: any) { next(e); }
     }
 
-    static async deleteWebhook(req: CascataRequest, res: any, next: NextFunction) {
+    static async deleteWebhook(req: CascataRequest, res: any, next: any) {
         try {
             await systemPool.query('DELETE FROM system.webhooks WHERE id = $1 AND project_slug = $2', [req.params.id, req.params.slug]);
             res.json({ success: true });
         } catch (e: any) { next(e); }
     }
 
-    static async updateWebhook(req: CascataRequest, res: any, next: NextFunction) {
+    static async updateWebhook(req: CascataRequest, res: any, next: any) {
         const { target_url, event_type, table_name, is_active, filters, fallback_url, retry_policy } = req.body;
         try {
             const fields = [];

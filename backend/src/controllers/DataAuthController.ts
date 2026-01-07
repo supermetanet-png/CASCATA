@@ -1,3 +1,4 @@
+
 import { NextFunction } from 'express';
 import bcrypt from 'bcrypt';
 import { CascataRequest } from '../types.js';
@@ -21,12 +22,12 @@ export class DataAuthController {
         };
     }
 
-    static async listUsers(req: CascataRequest, res: any, next: NextFunction) {
+    static async listUsers(req: CascataRequest, res: any, next: any) {
         if (!req.isSystemRequest) { res.status(403).json({ error: 'Unauthorized' }); return; }
         try { const result = await req.projectPool!.query(`SELECT u.id, u.created_at, u.banned, u.last_sign_in_at, u.email_confirmed_at, jsonb_agg(jsonb_build_object('id', i.id, 'provider', i.provider, 'identifier', i.identifier)) as identities FROM auth.users u LEFT JOIN auth.identities i ON u.id = i.user_id GROUP BY u.id ORDER BY u.created_at DESC`); res.json(result.rows); } catch (e: any) { next(e); }
     }
 
-    static async createUser(req: CascataRequest, res: any, next: NextFunction) {
+    static async createUser(req: CascataRequest, res: any, next: any) {
         const { strategies, profileData } = req.body; 
         try {
             const client = await req.projectPool!.connect();
@@ -47,7 +48,7 @@ export class DataAuthController {
         } catch (e: any) { next(e); }
     }
 
-    static async legacyToken(req: CascataRequest, res: any, next: NextFunction) {
+    static async legacyToken(req: CascataRequest, res: any, next: any) {
         const { provider, identifier, password } = req.body;
         const forwarded = req.headers['x-forwarded-for'];
         const realIp = req.headers['x-real-ip'];
@@ -85,7 +86,7 @@ export class DataAuthController {
     }
 
     // --- LINK/MANAGE IDENTITIES ---
-    static async linkIdentity(req: CascataRequest, res: any, next: NextFunction) {
+    static async linkIdentity(req: CascataRequest, res: any, next: any) {
         if (!req.isSystemRequest && req.userRole !== 'service_role') { return res.status(403).json({ error: 'Unauthorized' }); }
         const { provider, identifier, password } = req.body;
         const userId = req.params.id;
@@ -107,7 +108,7 @@ export class DataAuthController {
         } catch (e: any) { next(e); }
     }
 
-    static async unlinkIdentity(req: CascataRequest, res: any, next: NextFunction) {
+    static async unlinkIdentity(req: CascataRequest, res: any, next: any) {
         if (!req.isSystemRequest && req.userRole !== 'service_role') { return res.status(403).json({ error: 'Unauthorized' }); }
         try { 
             const countRes = await req.projectPool!.query('SELECT count(*) FROM auth.identities WHERE user_id = $1', [req.params.id]);
@@ -117,18 +118,18 @@ export class DataAuthController {
         } catch (e: any) { next(e); }
     }
 
-    static async updateUserStatus(req: CascataRequest, res: any, next: NextFunction) {
+    static async updateUserStatus(req: CascataRequest, res: any, next: any) {
         if (!req.isSystemRequest) { res.status(403).json({ error: 'Unauthorized' }); return; }
         try { await req.projectPool!.query('UPDATE auth.users SET banned = $1 WHERE id = $2', [req.body.banned, req.params.id]); res.json({ success: true }); } catch (e: any) { next(e); }
     }
 
-    static async deleteUser(req: CascataRequest, res: any, next: NextFunction) {
+    static async deleteUser(req: CascataRequest, res: any, next: any) {
         if (!req.isSystemRequest) { res.status(403).json({ error: 'Unauthorized' }); return; }
         try { await req.projectPool!.query('DELETE FROM auth.users WHERE id = $1', [req.params.id]); res.json({ success: true }); } catch (e: any) { next(e); }
     }
 
     // --- CONFIG & CHALLENGES ---
-    static async linkConfig(req: CascataRequest, res: any, next: NextFunction) {
+    static async linkConfig(req: CascataRequest, res: any, next: any) {
         const { linked_tables, authStrategies, authConfig } = req.body;
         try {
             const metaUpdates: any = {};
@@ -151,7 +152,7 @@ export class DataAuthController {
         } catch (e: any) { next(e); }
     }
 
-    static async challenge(req: CascataRequest, res: any, next: NextFunction) {
+    static async challenge(req: CascataRequest, res: any, next: any) {
         const { provider, identifier } = req.body;
         if (!provider || !identifier) return res.status(400).json({ error: 'Provider and Identifier required' });
         try {
@@ -164,7 +165,7 @@ export class DataAuthController {
         } catch(e: any) { next(e); }
     }
 
-    static async verifyChallenge(req: CascataRequest, res: any, next: NextFunction) {
+    static async verifyChallenge(req: CascataRequest, res: any, next: any) {
         const { provider, identifier, code } = req.body;
         if (!provider || !identifier || !code) return res.status(400).json({ error: 'Missing parameters' });
         try {
@@ -176,14 +177,14 @@ export class DataAuthController {
     }
 
     // --- GOTRUE COMPATIBILITY ---
-    static async goTrueSignup(req: CascataRequest, res: any, next: NextFunction) {
+    static async goTrueSignup(req: CascataRequest, res: any, next: any) {
         try {
             const response = await GoTrueService.handleSignup(req.projectPool!, req.body, req.project.jwt_secret, req.project.metadata || {});
             res.json(response);
         } catch(e: any) { next(e); }
     }
 
-    static async goTrueToken(req: CascataRequest, res: any, next: NextFunction) {
+    static async goTrueToken(req: CascataRequest, res: any, next: any) {
         const forwarded = req.headers['x-forwarded-for'];
         const realIp = req.headers['x-real-ip'];
         const socketIp = req.socket?.remoteAddress;
@@ -207,18 +208,18 @@ export class DataAuthController {
         }
     }
 
-    static async goTrueUser(req: CascataRequest, res: any, next: NextFunction) {
+    static async goTrueUser(req: CascataRequest, res: any, next: any) {
         if (!req.user || !req.user.sub) return res.status(401).json({ error: "unauthorized", error_description: "Missing or invalid token" });
         try { const user = await GoTrueService.handleGetUser(req.projectPool!, req.user.sub); res.json(user); } catch(e: any) { res.status(404).json({ error: "not_found", error_description: e.message }); }
     }
 
-    static async goTrueLogout(req: CascataRequest, res: any, next: NextFunction) {
+    static async goTrueLogout(req: CascataRequest, res: any, next: any) {
         const authHeader = req.headers.authorization;
         if (!authHeader) return res.status(401).json({ error: "unauthorized" });
         try { await GoTrueService.handleLogout(req.projectPool!, authHeader.replace('Bearer ', '').trim(), req.project.jwt_secret); res.status(204).send(); } catch(e) { res.status(500).json({ error: "server_error" }); }
     }
 
-    static async goTrueVerify(req: CascataRequest, res: any, next: NextFunction) {
+    static async goTrueVerify(req: CascataRequest, res: any, next: any) {
         const { token, type, redirect_to } = req.query;
         try {
             if (!token || !type) throw new Error("Missing token or type");
@@ -247,7 +248,7 @@ export class DataAuthController {
         } catch (e: any) { res.status(400).json({ error: e.message, error_code: 'validation_failed' }); }
     }
 
-    static async goTrueAuthorize(req: CascataRequest, res: any, next: NextFunction) {
+    static async goTrueAuthorize(req: CascataRequest, res: any, next: any) {
         const { provider, redirect_to } = req.query;
         if (!provider) return res.status(400).json({ error: 'Provider required' });
         try {
@@ -284,7 +285,7 @@ export class DataAuthController {
         } catch (e: any) { res.status(500).json({ error: e.message }); }
     }
 
-    static async goTrueCallback(req: CascataRequest, res: any, next: NextFunction) {
+    static async goTrueCallback(req: CascataRequest, res: any, next: any) {
         const { code, state, error } = req.query;
         if (error) return res.status(400).json({ error: 'OAuth Error', details: error });
         if (!code) return res.status(400).json({ error: 'No code provided' });

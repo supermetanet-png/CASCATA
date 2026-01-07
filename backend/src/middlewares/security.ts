@@ -5,6 +5,7 @@ import { CascataRequest } from '../types.js';
 import { systemPool } from '../config/main.js';
 import { parseBytes, formatBytes } from '../utils/index.js';
 import { RateLimitService } from '../../services/RateLimitService.js';
+import { Buffer } from 'buffer';
 
 // --- TRUSTED BUILDERS ---
 const TRUSTED_BUILDERS = [
@@ -128,7 +129,7 @@ export const dynamicBodyParser: RequestHandler = (req: any, res: any, next: any)
     // CRITICAL UPDATE: Capture Raw Body for HMAC Signature Verification
     const rawBodyBuffer = (req: any, _res: any, buf: Buffer, encoding: string) => {
         if (buf && buf.length) {
-            req.rawBody = buf.toString(encoding as BufferEncoding || 'utf8');
+            req.rawBody = buf.toString(encoding as any || 'utf8');
         }
     };
 
