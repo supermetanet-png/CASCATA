@@ -4,7 +4,7 @@ import {
   Zap, Globe, Plus, Trash2, Send, Activity, 
   CheckCircle2, AlertCircle, Loader2, ShieldCheck, 
   Settings, ExternalLink, RefreshCcw, X, Eye, EyeOff, Copy, Play, Filter,
-  Siren, ShieldAlert, AlertTriangle, ArrowRight, Download, Radio, Network
+  Siren, ShieldAlert, AlertTriangle
 } from 'lucide-react';
 
 interface FilterRule {
@@ -14,27 +14,20 @@ interface FilterRule {
 }
 
 const EventManager: React.FC<{ projectId: string }> = ({ projectId }) => {
-  const [activeTab, setActiveTab] = useState<'outgoing' | 'incoming'>('outgoing');
-  
-  // OUTGOING STATES
   const [webhooks, setWebhooks] = useState<any[]>([]);
   const [tables, setTables] = useState<string[]>([]);
-  const [tableColumns, setTableColumns] = useState<string[]>([]);
+  const [tableColumns, setTableColumns] = useState<string[]>([]); // New for Filter UI
   const [loading, setLoading] = useState(true);
   const [showAdd, setShowAdd] = useState(false);
   
-  // INCOMING STATES
-  const [ingressHooks, setIngressHooks] = useState<any[]>([]);
-  const [loadingIngress, setLoadingIngress] = useState(false);
-
-  // SHARED STATES
+  // FORM STATE
   const [newHook, setNewHook] = useState({ 
       target_url: '', 
       event_type: 'INSERT', 
       table_name: '*', 
       filters: [] as FilterRule[],
       fallback_url: '',
-      retry_policy: 'standard'
+      retry_policy: 'standard' // 'standard', 'none', 'linear'
   });
   
   const [submitting, setSubmitting] = useState(false);
@@ -50,19 +43,9 @@ const EventManager: React.FC<{ projectId: string }> = ({ projectId }) => {
       });
       const data = await res.json();
       setWebhooks(Array.isArray(data) ? data : []);
-    } catch (e) { console.error("Webhooks fetch error"); }
-  };
-
-  const fetchIngressHooks = async () => {
-      setLoadingIngress(true);
-      try {
-          const res = await fetch(`/api/data/${projectId}/hooks/in`, {
-              headers: { 'Authorization': `Bearer ${localStorage.getItem('cascata_token')}` }
-          });
-          const data = await res.json();
-          setIngressHooks(Array.isArray(data) ? data : []);
-      } catch (e) { console.error("Ingress hooks fetch error"); }
-      finally { setLoadingIngress(false); }
+    } catch (e) {
+      console.error("Webhooks fetch error");
+    }
   };
 
   const fetchTables = async () => {
@@ -91,15 +74,13 @@ const EventManager: React.FC<{ projectId: string }> = ({ projectId }) => {
 
   useEffect(() => { 
       Promise.all([fetchHooks(), fetchTables()]).then(() => setLoading(false)); 
-      if (activeTab === 'incoming') fetchIngressHooks();
   }, [projectId]);
 
+  // Effect to load columns when table changes in form
   useEffect(() => {
-      if (activeTab === 'incoming') fetchIngressHooks();
-  }, [activeTab]);
-
-  useEffect(() => {
-      if (showAdd && newHook.table_name) fetchColumns(newHook.table_name);
+      if (showAdd && newHook.table_name) {
+          fetchColumns(newHook.table_name);
+      }
   }, [newHook.table_name, showAdd]);
 
   const handleCreate = async () => {
@@ -127,20 +108,15 @@ const EventManager: React.FC<{ projectId: string }> = ({ projectId }) => {
     }
   };
 
-  const handleDelete = async (id: string, type: 'outgoing' | 'incoming') => {
+  const handleDelete = async (id: string) => {
       if(!confirm("Tem certeza? Esta ação é irreversível.")) return;
       try {
-          const endpoint = type === 'outgoing' 
-            ? `/api/control/projects/${projectId}/webhooks/${id}`
-            : `/api/data/${projectId}/hooks/in/${id}`;
-            
-          await fetch(endpoint, {
+          await fetch(`/api/control/projects/${projectId}/webhooks/${id}`, {
               method: 'DELETE',
               headers: { 'Authorization': `Bearer ${localStorage.getItem('cascata_token')}` }
           });
-          
-          if (type === 'outgoing') fetchHooks(); else fetchIngressHooks();
-          setSuccess("Endpoint removido.");
+          fetchHooks();
+          setSuccess("Webhook removido.");
       } catch(e) { setError("Falha ao remover."); }
       setTimeout(() => setSuccess(null), 3000);
   };
@@ -154,15 +130,6 @@ const EventManager: React.FC<{ projectId: string }> = ({ projectId }) => {
           });
           fetchHooks();
       } catch(e) { setError("Erro ao atualizar status."); }
-  };
-
-  const handleCreateIngress = () => {
-      // Navigate to NEW ingress editor
-      window.location.hash = `#/project/${projectId}/events/ingress-designer/new`;
-  };
-
-  const handleEditIngress = (id: string) => {
-      window.location.hash = `#/project/${projectId}/events/ingress-designer/${id}`;
   };
 
   const handleTest = async (id: string) => {
@@ -185,25 +152,32 @@ const EventManager: React.FC<{ projectId: string }> = ({ projectId }) => {
 
   const copySecret = (text: string) => {
       navigator.clipboard.writeText(text);
-      setSuccess("Copiado!");
+      setSuccess("Segredo copiado!");
       setTimeout(() => setSuccess(null), 2000);
   };
 
-  // Filter Logic Helpers
-  const addFilter = () => setNewHook(prev => ({ ...prev, filters: [...prev.filters, { field: tableColumns[0] || '', operator: 'eq', value: '' }] }));
-  const removeFilter = (idx: number) => setNewHook(prev => ({ ...prev, filters: prev.filters.filter((_, i) => i !== idx) }));
+  const addFilter = () => {
+      setNewHook(prev => ({
+          ...prev,
+          filters: [...prev.filters, { field: tableColumns[0] || '', operator: 'eq', value: '' }]
+      }));
+  };
+
+  const removeFilter = (idx: number) => {
+      setNewHook(prev => ({
+          ...prev,
+          filters: prev.filters.filter((_, i) => i !== idx)
+      }));
+  };
+
   const updateFilter = (idx: number, field: string, val: any) => {
       const updated = [...newHook.filters];
       updated[idx] = { ...updated[idx], [field]: val };
       setNewHook(prev => ({ ...prev, filters: updated }));
   };
 
-  const getPublicIngressUrl = (routeSlug: string) => {
-      return `${window.location.origin}/api/data/${projectId}/hooks/in/${routeSlug}`;
-  };
-
   return (
-    <div className="p-8 lg:p-12 max-w-6xl mx-auto w-full space-y-10 pb-40">
+    <div className="p-8 lg:p-12 max-w-6xl mx-auto w-full space-y-12 pb-40">
       
       {/* Toast */}
       {(success || error) && (
@@ -213,250 +187,129 @@ const EventManager: React.FC<{ projectId: string }> = ({ projectId }) => {
           </div>
       )}
 
-      <header className="flex flex-col gap-6">
-        <div className="flex items-end justify-between">
-            <div>
-            <h2 className="text-4xl font-black text-slate-900 tracking-tighter">Event Pipeline</h2>
-            <p className="text-slate-500 mt-2 text-lg">Orquestração de eventos, Webhooks e integrações externas.</p>
-            </div>
-            
-            {activeTab === 'outgoing' ? (
-                <button 
-                onClick={() => setShowAdd(true)}
-                className="bg-indigo-600 text-white px-8 py-4 rounded-2xl font-black text-xs uppercase tracking-widest flex items-center gap-2 hover:bg-indigo-700 transition-all shadow-xl shadow-indigo-100"
-                >
-                <Plus size={20} /> Adicionar Webhook
-                </button>
-            ) : (
-                <button 
-                onClick={handleCreateIngress}
-                className="bg-emerald-600 text-white px-8 py-4 rounded-2xl font-black text-xs uppercase tracking-widest flex items-center gap-2 hover:bg-emerald-700 transition-all shadow-xl shadow-emerald-100"
-                >
-                <Plus size={20} /> Criar Receptor (Ingress)
-                </button>
-            )}
+      <header className="flex items-end justify-between gap-8">
+        <div>
+          <h2 className="text-4xl font-black text-slate-900 tracking-tighter">Event Pipeline</h2>
+          <p className="text-slate-500 mt-2 text-lg">Conecte o Cascata a serviços externos (n8n, Zapier) via Webhooks nativos.</p>
         </div>
-
-        {/* TAB SWITCHER */}
-        <div className="flex bg-slate-100 p-1.5 rounded-2xl w-fit">
-            <button 
-                onClick={() => setActiveTab('outgoing')} 
-                className={`px-8 py-3 rounded-xl text-xs font-black uppercase tracking-widest transition-all flex items-center gap-2 ${activeTab === 'outgoing' ? 'bg-white shadow-md text-indigo-600' : 'text-slate-400 hover:text-slate-600'}`}
-            >
-                <Radio size={16}/> Outgoing (Egress)
-            </button>
-            <button 
-                onClick={() => setActiveTab('incoming')} 
-                className={`px-8 py-3 rounded-xl text-xs font-black uppercase tracking-widest transition-all flex items-center gap-2 ${activeTab === 'incoming' ? 'bg-white shadow-md text-emerald-600' : 'text-slate-400 hover:text-slate-600'}`}
-            >
-                <Network size={16}/> Incoming (Ingress)
-            </button>
-        </div>
+        <button 
+          onClick={() => setShowAdd(true)}
+          className="bg-indigo-600 text-white px-8 py-4 rounded-2xl font-black text-xs uppercase tracking-widest flex items-center gap-2 hover:bg-indigo-700 transition-all shadow-xl shadow-indigo-100"
+        >
+          <Plus size={20} /> Adicionar Webhook
+        </button>
       </header>
 
-      {/* OUTGOING TAB CONTENT */}
-      {activeTab === 'outgoing' && (
-          loading ? (
-            <div className="py-40 flex flex-col items-center justify-center text-slate-300">
-              <Loader2 size={60} className="animate-spin mb-6" />
-              <p className="text-sm font-black uppercase tracking-widest">Sincronizando endpoints...</p>
-            </div>
-          ) : (
-            <div className="grid grid-cols-1 lg:grid-cols-3 gap-10 animate-in fade-in slide-in-from-bottom-4">
-              <div className="lg:col-span-2 space-y-6">
-                {webhooks.length === 0 && (
-                  <div className="py-40 border-4 border-dashed border-slate-100 rounded-[3rem] flex flex-col items-center justify-center text-slate-300">
-                    <Zap size={60} className="mb-4 opacity-10" />
-                    <p className="text-[10px] font-black uppercase tracking-widest">Nenhum evento configurado</p>
-                  </div>
-                )}
-                {webhooks.map(hook => (
-                  <div key={hook.id} className={`bg-white border rounded-[2.5rem] p-8 shadow-sm hover:shadow-xl transition-all group relative ${hook.is_active ? 'border-slate-200' : 'border-slate-100 opacity-75 grayscale-[0.5]'}`}>
-                    <div className="flex items-center justify-between mb-6">
-                      <div className="flex items-center gap-4">
-                        <div className={`w-12 h-12 rounded-2xl flex items-center justify-center shadow-inner ${hook.is_active ? 'bg-emerald-50 text-emerald-600' : 'bg-slate-100 text-slate-400'}`}>
-                          <Zap size={20} />
-                        </div>
-                        <div>
-                          <h4 className="text-sm font-black text-slate-900 truncate max-w-md" title={hook.target_url}>{hook.target_url}</h4>
-                          <div className="flex items-center gap-2 mt-1">
-                            <span className={`text-[9px] font-black px-2 py-0.5 rounded-full uppercase ${hook.event_type === 'DELETE' ? 'bg-rose-50 text-rose-600' : hook.event_type === 'INSERT' ? 'bg-emerald-50 text-emerald-600' : 'bg-indigo-50 text-indigo-600'}`}>{hook.event_type === '*' ? 'ALL EVENTS' : hook.event_type}</span>
-                            <span className="text-[9px] font-black bg-slate-100 text-slate-500 px-2 py-0.5 rounded-full uppercase">Table: {hook.table_name === '*' ? 'ALL TABLES' : hook.table_name}</span>
-                            {hook.retry_policy === 'none' && <span className="text-[9px] font-black bg-rose-50 text-rose-600 px-2 py-0.5 rounded-full uppercase border border-rose-100 flex items-center gap-1"><AlertTriangle size={8}/> NO RETRY</span>}
-                          </div>
-                        </div>
-                      </div>
-                      <div className="flex items-center gap-2">
-                          <button onClick={() => handleTest(hook.id)} disabled={testLoading === hook.id} className="p-2 bg-slate-50 hover:bg-indigo-50 text-slate-400 hover:text-indigo-600 rounded-xl transition-all" title="Test Payload">
-                              {testLoading === hook.id ? <Loader2 size={18} className="animate-spin"/> : <Play size={18}/>}
-                          </button>
-                          <button onClick={() => handleDelete(hook.id, 'outgoing')} className="p-2 bg-slate-50 hover:bg-rose-50 text-slate-400 hover:text-rose-600 rounded-xl transition-all" title="Delete">
-                              <Trash2 size={18}/>
-                          </button>
-                      </div>
-                    </div>
-                    
-                    {/* Active Filters Display */}
-                    {hook.filters && hook.filters.length > 0 && (
-                        <div className="flex flex-wrap gap-2 mb-4 pl-16">
-                            {hook.filters.map((f: any, i: number) => (
-                                <span key={i} className="text-[9px] bg-indigo-50 text-indigo-700 px-2 py-1 rounded border border-indigo-100 font-mono">
-                                    {f.field} {f.operator} {f.value}
-                                </span>
-                            ))}
-                        </div>
-                    )}
-
-                    {/* Fallback Display */}
-                    {hook.fallback_url && (
-                        <div className="mb-4 pl-16 flex items-center gap-2 text-[10px] text-rose-500 font-bold">
-                            <Siren size={12}/>
-                            <span>Alert on Failure:</span>
-                            <code className="bg-rose-50 px-2 py-0.5 rounded text-rose-700 font-mono">{hook.fallback_url}</code>
-                        </div>
-                    )}
-
-                    {/* Secret Section */}
-                    <div className="bg-slate-50 rounded-xl p-3 flex items-center justify-between mb-4 border border-slate-100">
-                        <div className="flex items-center gap-2 text-[10px] font-mono text-slate-500">
-                            <ShieldCheck size={12} className="text-indigo-400"/>
-                            <span>Secret:</span>
-                            <span className="bg-white px-2 py-0.5 rounded border border-slate-200">
-                                {revealedSecret === hook.id ? (hook.secret_header || 'default_jwt_secret') : '••••••••••••••••••••••••'}
-                            </span>
-                        </div>
-                        <div className="flex gap-1">
-                            <button onClick={() => setRevealedSecret(revealedSecret === hook.id ? null : hook.id)} className="p-1.5 hover:bg-white rounded-lg text-slate-400 hover:text-indigo-600 transition-all">
-                                {revealedSecret === hook.id ? <EyeOff size={14}/> : <Eye size={14}/>}
-                            </button>
-                            <button onClick={() => copySecret(hook.secret_header || 'default_jwt_secret')} className="p-1.5 hover:bg-white rounded-lg text-slate-400 hover:text-indigo-600 transition-all">
-                                <Copy size={14}/>
-                            </button>
-                        </div>
-                    </div>
-
-                    <div className="pt-4 border-t border-slate-50 flex items-center justify-between">
-                      <div className="flex items-center gap-2">
-                          <div className={`w-2 h-2 rounded-full ${hook.is_active ? 'bg-emerald-500 animate-pulse' : 'bg-slate-300'}`}></div>
-                          <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">{hook.is_active ? 'Active Pipeline' : 'Paused'}</span>
-                      </div>
-                      <button onClick={() => handleToggle(hook)} className={`text-[10px] font-bold uppercase tracking-widest px-3 py-1 rounded-lg transition-all ${hook.is_active ? 'bg-slate-100 text-slate-500 hover:bg-amber-50 hover:text-amber-600' : 'bg-emerald-50 text-emerald-600 hover:bg-emerald-100'}`}>
-                          {hook.is_active ? 'Pause' : 'Resume'}
-                      </button>
-                    </div>
-                  </div>
-                ))}
+      {loading ? (
+        <div className="py-40 flex flex-col items-center justify-center text-slate-300">
+          <Loader2 size={60} className="animate-spin mb-6" />
+          <p className="text-sm font-black uppercase tracking-widest">Sincronizando endpoints...</p>
+        </div>
+      ) : (
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-10">
+          <div className="lg:col-span-2 space-y-6">
+            {webhooks.length === 0 && (
+              <div className="py-40 border-4 border-dashed border-slate-100 rounded-[3rem] flex flex-col items-center justify-center text-slate-300">
+                <Zap size={60} className="mb-4 opacity-10" />
+                <p className="text-[10px] font-black uppercase tracking-widest">Nenhum evento configurado</p>
               </div>
+            )}
+            {webhooks.map(hook => (
+              <div key={hook.id} className={`bg-white border rounded-[2.5rem] p-8 shadow-sm hover:shadow-xl transition-all group relative ${hook.is_active ? 'border-slate-200' : 'border-slate-100 opacity-75 grayscale-[0.5]'}`}>
+                <div className="flex items-center justify-between mb-6">
+                  <div className="flex items-center gap-4">
+                    <div className={`w-12 h-12 rounded-2xl flex items-center justify-center shadow-inner ${hook.is_active ? 'bg-emerald-50 text-emerald-600' : 'bg-slate-100 text-slate-400'}`}>
+                      <Zap size={20} />
+                    </div>
+                    <div>
+                      <h4 className="text-sm font-black text-slate-900 truncate max-w-md" title={hook.target_url}>{hook.target_url}</h4>
+                      <div className="flex items-center gap-2 mt-1">
+                        <span className={`text-[9px] font-black px-2 py-0.5 rounded-full uppercase ${hook.event_type === 'DELETE' ? 'bg-rose-50 text-rose-600' : hook.event_type === 'INSERT' ? 'bg-emerald-50 text-emerald-600' : 'bg-indigo-50 text-indigo-600'}`}>{hook.event_type === '*' ? 'ALL EVENTS' : hook.event_type}</span>
+                        <span className="text-[9px] font-black bg-slate-100 text-slate-500 px-2 py-0.5 rounded-full uppercase">Table: {hook.table_name === '*' ? 'ALL TABLES' : hook.table_name}</span>
+                        {hook.retry_policy === 'none' && <span className="text-[9px] font-black bg-rose-50 text-rose-600 px-2 py-0.5 rounded-full uppercase border border-rose-100 flex items-center gap-1"><AlertTriangle size={8}/> NO RETRY</span>}
+                      </div>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2">
+                      <button onClick={() => handleTest(hook.id)} disabled={testLoading === hook.id} className="p-2 bg-slate-50 hover:bg-indigo-50 text-slate-400 hover:text-indigo-600 rounded-xl transition-all" title="Test Payload">
+                          {testLoading === hook.id ? <Loader2 size={18} className="animate-spin"/> : <Play size={18}/>}
+                      </button>
+                      <button onClick={() => handleDelete(hook.id)} className="p-2 bg-slate-50 hover:bg-rose-50 text-slate-400 hover:text-rose-600 rounded-xl transition-all" title="Delete">
+                          <Trash2 size={18}/>
+                      </button>
+                  </div>
+                </div>
+                
+                {/* Active Filters Display */}
+                {hook.filters && hook.filters.length > 0 && (
+                    <div className="flex flex-wrap gap-2 mb-4 pl-16">
+                        {hook.filters.map((f: any, i: number) => (
+                            <span key={i} className="text-[9px] bg-indigo-50 text-indigo-700 px-2 py-1 rounded border border-indigo-100 font-mono">
+                                {f.field} {f.operator} {f.value}
+                            </span>
+                        ))}
+                    </div>
+                )}
 
-              <aside className="space-y-8">
-                <div className="bg-slate-900 rounded-[2.5rem] p-8 text-white relative overflow-hidden shadow-2xl">
-                    <Activity className="absolute -bottom-4 -right-4 text-white/5 w-40 h-40" />
-                    <h3 className="text-lg font-black uppercase tracking-tight mb-4 flex items-center gap-2">
-                      <ShieldCheck className="text-indigo-400" size={20} /> Segurança de Eventos
-                    </h3>
-                    <p className="text-xs text-slate-400 leading-relaxed mb-6 font-medium">
-                      Cada webhook enviado inclui um header <code>X-Cascata-Signature</code>. Use o segredo exibido ao lado para validar a autenticidade (HMAC SHA256).
-                    </p>
-                    <div className="bg-white/10 p-4 rounded-xl border border-white/5 font-mono text-[10px] text-emerald-300">
-                        verify_signature(payload, secret, header_sig)
+                {/* Fallback Display */}
+                {hook.fallback_url && (
+                    <div className="mb-4 pl-16 flex items-center gap-2 text-[10px] text-rose-500 font-bold">
+                        <Siren size={12}/>
+                        <span>Alert on Failure:</span>
+                        <code className="bg-rose-50 px-2 py-0.5 rounded text-rose-700 font-mono">{hook.fallback_url}</code>
+                    </div>
+                )}
+
+                {/* Secret Section */}
+                <div className="bg-slate-50 rounded-xl p-3 flex items-center justify-between mb-4 border border-slate-100">
+                    <div className="flex items-center gap-2 text-[10px] font-mono text-slate-500">
+                        <ShieldCheck size={12} className="text-indigo-400"/>
+                        <span>Secret:</span>
+                        <span className="bg-white px-2 py-0.5 rounded border border-slate-200">
+                            {revealedSecret === hook.id ? (hook.secret_header || 'default_jwt_secret') : '••••••••••••••••••••••••'}
+                        </span>
+                    </div>
+                    <div className="flex gap-1">
+                        <button onClick={() => setRevealedSecret(revealedSecret === hook.id ? null : hook.id)} className="p-1.5 hover:bg-white rounded-lg text-slate-400 hover:text-indigo-600 transition-all">
+                            {revealedSecret === hook.id ? <EyeOff size={14}/> : <Eye size={14}/>}
+                        </button>
+                        <button onClick={() => copySecret(hook.secret_header || 'default_jwt_secret')} className="p-1.5 hover:bg-white rounded-lg text-slate-400 hover:text-indigo-600 transition-all">
+                            <Copy size={14}/>
+                        </button>
                     </div>
                 </div>
-              </aside>
-            </div>
-          )
-      )}
 
-      {/* INCOMING TAB CONTENT */}
-      {activeTab === 'incoming' && (
-          loadingIngress ? (
-            <div className="py-40 flex flex-col items-center justify-center text-slate-300">
-              <Loader2 size={60} className="animate-spin mb-6" />
-              <p className="text-sm font-black uppercase tracking-widest">Carregando receptores...</p>
-            </div>
-          ) : (
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-8 animate-in fade-in slide-in-from-bottom-4">
-                {ingressHooks.length === 0 && (
-                  <div className="col-span-full py-40 border-4 border-dashed border-slate-100 rounded-[3rem] flex flex-col items-center justify-center text-slate-300">
-                    <Network size={60} className="mb-4 opacity-10" />
-                    <p className="text-[10px] font-black uppercase tracking-widest">Nenhum receptor configurado</p>
-                    <p className="text-xs mt-2 text-slate-400">Crie um endpoint para receber dados externos (Stripe, GitHub, etc).</p>
+                <div className="pt-4 border-t border-slate-50 flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                      <div className={`w-2 h-2 rounded-full ${hook.is_active ? 'bg-emerald-500 animate-pulse' : 'bg-slate-300'}`}></div>
+                      <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">{hook.is_active ? 'Active Pipeline' : 'Paused'}</span>
                   </div>
-                )}
-                
-                {ingressHooks.map(hook => (
-                    <div key={hook.id} className="bg-white border border-slate-200 rounded-[2.5rem] p-8 shadow-sm hover:shadow-xl transition-all group flex flex-col justify-between h-full">
-                        <div>
-                            <div className="flex items-center justify-between mb-6">
-                                <div className="w-12 h-12 bg-emerald-50 text-emerald-600 rounded-2xl flex items-center justify-center shadow-inner">
-                                    <Network size={22}/>
-                                </div>
-                                <span className={`px-2 py-1 rounded-lg text-[9px] font-black uppercase tracking-widest ${hook.is_active ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-100 text-slate-400'}`}>
-                                    {hook.is_active ? 'Active' : 'Disabled'}
-                                </span>
-                            </div>
-                            
-                            <h3 className="text-xl font-black text-slate-900 mb-2 truncate">{hook.name}</h3>
-                            <div className="bg-slate-50 rounded-xl p-3 border border-slate-100 mb-6 group-hover:border-indigo-100 transition-colors">
-                                <div className="flex items-center gap-2 mb-1">
-                                    <span className="text-[9px] font-black bg-slate-200 text-slate-600 px-1.5 py-0.5 rounded">POST</span>
-                                    <span className="text-[10px] font-mono text-slate-500 truncate block flex-1">.../hooks/in/{hook.route_slug}</span>
-                                </div>
-                                <button 
-                                    onClick={() => copySecret(getPublicIngressUrl(hook.route_slug))}
-                                    className="text-[9px] font-bold text-indigo-600 hover:underline flex items-center gap-1 mt-1"
-                                >
-                                    <Copy size={10}/> Copy Public URL
-                                </button>
-                            </div>
+                  <button onClick={() => handleToggle(hook)} className={`text-[10px] font-bold uppercase tracking-widest px-3 py-1 rounded-lg transition-all ${hook.is_active ? 'bg-slate-100 text-slate-500 hover:bg-amber-50 hover:text-amber-600' : 'bg-emerald-50 text-emerald-600 hover:bg-emerald-100'}`}>
+                      {hook.is_active ? 'Pause' : 'Resume'}
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
 
-                            <div className="flex gap-2 mb-6">
-                                <div className={`flex-1 p-2 rounded-xl border text-center ${hook.security_config?.verify_signature ? 'bg-indigo-50 border-indigo-100 text-indigo-700' : 'bg-slate-50 border-slate-100 text-slate-400'}`}>
-                                    <ShieldCheck size={16} className="mx-auto mb-1"/>
-                                    <span className="text-[9px] font-black uppercase">HMAC</span>
-                                </div>
-                                <div className={`flex-1 p-2 rounded-xl border text-center ${hook.security_config?.allowed_ips?.length > 0 ? 'bg-amber-50 border-amber-100 text-amber-700' : 'bg-slate-50 border-slate-100 text-slate-400'}`}>
-                                    <ShieldAlert size={16} className="mx-auto mb-1"/>
-                                    <span className="text-[9px] font-black uppercase">Firewall</span>
-                                </div>
-                                <div className={`flex-1 p-2 rounded-xl border text-center ${hook.flow_definition?.length > 0 ? 'bg-emerald-50 border-emerald-100 text-emerald-700' : 'bg-slate-50 border-slate-100 text-slate-400'}`}>
-                                    <Zap size={16} className="mx-auto mb-1"/>
-                                    <span className="text-[9px] font-black uppercase">{hook.flow_definition?.length || 0} Steps</span>
-                                </div>
-                            </div>
-                        </div>
-
-                        <div className="flex gap-3 pt-6 border-t border-slate-50">
-                            <button 
-                                onClick={() => handleEditIngress(hook.id)}
-                                className="flex-1 bg-slate-900 text-white py-3 rounded-xl text-xs font-black uppercase tracking-widest hover:bg-indigo-600 transition-all shadow-lg flex items-center justify-center gap-2"
-                            >
-                                <Settings size={14}/> Configure
-                            </button>
-                            <button 
-                                onClick={() => handleDelete(hook.id, 'incoming')}
-                                className="p-3 bg-rose-50 text-rose-600 rounded-xl hover:bg-rose-600 hover:text-white transition-all shadow-sm"
-                            >
-                                <Trash2 size={16}/>
-                            </button>
-                        </div>
-                    </div>
-                ))}
-                
-                <button 
-                    onClick={handleCreateIngress}
-                    className="border-4 border-dashed border-slate-100 rounded-[2.5rem] flex flex-col items-center justify-center text-slate-300 hover:border-emerald-200 hover:text-emerald-500 hover:bg-emerald-50/20 transition-all min-h-[300px] group"
-                >
-                    <div className="w-16 h-16 bg-slate-50 rounded-2xl flex items-center justify-center mb-4 group-hover:bg-white group-hover:shadow-xl transition-all">
-                        <Plus size={32}/>
-                    </div>
-                    <span className="font-black text-lg tracking-tight">Novo Receptor</span>
-                </button>
+          <aside className="space-y-8">
+            <div className="bg-slate-900 rounded-[2.5rem] p-8 text-white relative overflow-hidden shadow-2xl">
+                <Activity className="absolute -bottom-4 -right-4 text-white/5 w-40 h-40" />
+                <h3 className="text-lg font-black uppercase tracking-tight mb-4 flex items-center gap-2">
+                  <ShieldCheck className="text-indigo-400" size={20} /> Segurança de Eventos
+                </h3>
+                <p className="text-xs text-slate-400 leading-relaxed mb-6 font-medium">
+                  Cada webhook enviado inclui um header <code>X-Cascata-Signature</code>. Use o segredo exibido ao lado para validar a autenticidade (HMAC SHA256).
+                </p>
+                <div className="bg-white/10 p-4 rounded-xl border border-white/5 font-mono text-[10px] text-emerald-300">
+                    verify_signature(payload, secret, header_sig)
+                </div>
             </div>
-          )
+          </aside>
+        </div>
       )}
 
-      {/* ADD MODAL (OUTGOING ONLY - INCOMING USES FULL PAGE DESIGNER) */}
-      {showAdd && activeTab === 'outgoing' && (
+      {showAdd && (
         <div className="fixed inset-0 bg-slate-950/60 backdrop-blur-md z-[500] flex items-center justify-center p-8 animate-in zoom-in-95">
            <div className="bg-white rounded-[3.5rem] w-full max-w-xl p-12 shadow-2xl border border-slate-100 relative max-h-[90vh] overflow-y-auto custom-scrollbar">
               <button onClick={() => setShowAdd(false)} className="absolute top-8 right-8 text-slate-300 hover:text-slate-900 transition-colors"><X size={24} /></button>

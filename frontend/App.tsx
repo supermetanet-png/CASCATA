@@ -18,7 +18,6 @@ import StorageExplorer from './pages/StorageExplorer';
 import EventManager from './pages/EventManager';
 import ProjectLogs from './pages/ProjectLogs';
 import RLSDesigner from './pages/RLSDesigner';
-import IngressDesigner from './pages/IngressDesigner'; // NEW IMPORT
 import APIDocs from './pages/APIDocs';
 import CascataArchitect from './components/CascataArchitect';
 
@@ -73,12 +72,6 @@ const App: React.FC = () => {
         return <RLSDesigner projectId={projectId} entityType={entityType} entityName={entityName} onBack={() => navigate(`#/project/${projectId}/rls`)} />;
       }
 
-      // NEW ROUTE: Ingress Designer
-      if (section === 'ingress-designer') {
-        const hookId = parts[4]; // 'new' or UUID
-        return <IngressDesigner projectId={projectId} hookId={hookId} onBack={() => navigate(`#/project/${projectId}/events`)} />;
-      }
-
       switch(section) {
         case 'overview': return <ProjectDetail projectId={projectId} />;
         case 'database': return <DatabaseExplorer projectId={projectId} />;
@@ -97,8 +90,7 @@ const App: React.FC = () => {
 
   if (currentHash === '#/login' || !isAuthenticated) return renderContent();
 
-  // Immersive modes hide the sidebar
-  const isImmersive = currentHash.includes('/rls-editor') || currentHash.includes('/ingress-designer');
+  const isImmersive = currentHash.includes('/rls-editor');
 
   return (
     <div className="flex h-screen bg-[#F8FAFC] overflow-hidden">
@@ -177,7 +169,7 @@ const App: React.FC = () => {
                   <SidebarItem 
                     icon={<Zap />} 
                     label="Event Hooks" 
-                    active={currentHash.includes('/events') || currentHash.includes('/ingress-designer')} 
+                    active={currentHash.includes('/events')} 
                     expanded={isExpanded}
                     onClick={() => navigate(`#/project/${selectedProjectId}/events`)} 
                   />

@@ -6,7 +6,6 @@ import { AiController } from '../controllers/AiController.js';
 import { EdgeController } from '../controllers/EdgeController.js';
 import { SecurityController } from '../controllers/SecurityController.js';
 import { DataAuthController } from '../controllers/DataAuthController.js';
-import { IngressController } from '../controllers/IngressController.js'; // Novo Controller
 import { upload } from '../config/main.js';
 import { cascataAuth } from '../middlewares/core.js';
 import { dynamicBodyParser, dynamicRateLimiter } from '../middlewares/security.js';
@@ -19,11 +18,6 @@ const router = Router({ mergeParams: true });
 router.use(dynamicBodyParser as any);
 router.use(dynamicRateLimiter as any);
 router.use(auditLogger as any);
-
-// --- ROTA PÚBLICA DE ENTRADA DE WEBHOOKS (INGRESS) ---
-// Deve vir ANTES do cascataAuth para permitir chamadas externas sem JWT do sistema
-router.post('/hooks/in/:routeSlug', IngressController.handleIncoming as any);
-
 router.use(cascataAuth as any);
 
 // Realtime (SSE)
@@ -98,12 +92,6 @@ router.get('/policies', SecurityController.listPolicies as any);
 router.post('/policies', SecurityController.createPolicy as any);
 router.delete('/policies/:table/:name', SecurityController.deletePolicy as any);
 router.get('/logs', SecurityController.getLogs as any);
-
-// Webhooks Ingress Management (Control Plane inside Data API for convenience)
-router.get('/hooks/in', IngressController.listHooks as any);
-router.post('/hooks/in', IngressController.createHook as any);
-router.patch('/hooks/in/:id', IngressController.updateHook as any);
-router.delete('/hooks/in/:id', IngressController.deleteHook as any);
 
 // System Assets & Settings
 router.get('/ui-settings/:table', DataController.getUiSettings as any);

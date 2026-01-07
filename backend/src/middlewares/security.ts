@@ -7,6 +7,8 @@ import { parseBytes, formatBytes } from '../utils/index.js';
 import { RateLimitService } from '../../services/RateLimitService.js';
 
 // --- TRUSTED BUILDERS ---
+// Ferramentas No-Code que precisam ler o Swagger/OpenAPI antes de ter o contexto do projeto carregado.
+// Isso resolve o problema do "Preflight" (OPTIONS) falhar antes do resolveProject rodar.
 const TRUSTED_BUILDERS = [
   'https://app.flutterflow.io',
   'https://flutterflow.io',
@@ -18,31 +20,44 @@ const TRUSTED_BUILDERS = [
 export const dynamicCors: RequestHandler = (req: any, res: any, next: any) => {
     const origin = req.headers.origin;
     
+    // Headers padrão para suportar PostgREST/Supabase Clients
     res.setHeader('Access-Control-Allow-Credentials', 'true');
     res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,PATCH,DELETE,OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type,Authorization,apikey,x-cascata-client,Prefer,Range,x-client-info,x-supabase-auth,content-profile,accept-profile,x-supabase-api-version,x-cascata-signature,x-cascata-event');
     res.setHeader('Access-Control-Expose-Headers', 'Content-Range, X-Total-Count, Link');
 
+    // 1. TRUSTED BUILDERS BYPASS (Cirúrgico para FlutterFlow/AppSmith)
+    // Se a origem é uma ferramenta de construção confiável, liberamos o CORS imediatamente.
+    // A segurança real (leitura de dados) ainda é barrada se a flag 'schema_exposure' estiver off.
     if (origin && TRUSTED_BUILDERS.includes(origin)) {
         res.setHeader('Access-Control-Allow-Origin', origin);
         if (req.method === 'OPTIONS') return res.status(200).end();
         return next();
     }
 
+    // 2. Pre-flight check / System check padrão
     if (!req.project) {
+        // Permitir acesso ao dashboard se a origem bater com o domínio do sistema (confiança implícita)
+        // Mas NÃO refletir origens arbitrárias.
         if (req.method === 'OPTIONS') return res.status(200).end();
         return next();
     }
 
+    // 3. Project Security Policy (Carregado do Banco)
     const allowedOrigins = req.project.metadata?.allowed_origins || [];
     const safeOrigins = allowedOrigins.map((o: any) => typeof o === 'string' ? o : o.url);
     
     if (safeOrigins.length === 0) {
+        // MODO PÚBLICO (Development Convenience)
+        // Se a lista estiver vazia, permitimos localhost para desenvolvimento.
+        // NÃO liberamos '*' globalmente para manter Credentials=true funcionando.
         if (origin && (origin.includes('localhost') || origin.includes('127.0.0.1'))) {
              res.setHeader('Access-Control-Allow-Origin', origin);
         }
     } 
     else {
+        // MODO ESTRITO (Production)
+        // Verifica Whitelist do Banco de Dados
         if (origin && safeOrigins.includes(origin)) {
             res.setHeader('Access-Control-Allow-Origin', origin);
         }
@@ -109,7 +124,7 @@ export const controlPlaneFirewall: RequestHandler = async (req: any, res: any, n
   next();
 };
 
-export const dynamicBodyParser: RequestHandler = (req: any, res: any, next: any) => {
+export const dynamicBodyParser: RequestHandler = (req, res, next) => {
     const SYSTEM_HARD_CAP_BYTES = 50 * 1024 * 1024; 
     let limitStr = '2mb'; 
 
@@ -125,14 +140,7 @@ export const dynamicBodyParser: RequestHandler = (req: any, res: any, next: any)
     const requestedBytes = parseBytes(limitStr);
     const safeLimit = Math.min(requestedBytes, SYSTEM_HARD_CAP_BYTES);
 
-    // CRITICAL UPDATE: Capture Raw Body for HMAC Signature Verification
-    const rawBodyBuffer = (req: any, _res: any, buf: Buffer, encoding: string) => {
-        if (buf && buf.length) {
-            req.rawBody = buf.toString(encoding as BufferEncoding || 'utf8');
-        }
-    };
-
-    express.json({ limit: safeLimit, verify: rawBodyBuffer })(req, res, (err) => {
+    express.json({ limit: safeLimit })(req, res, (err) => {
         if (err) {
             return res.status(413).json({
                 error: 'Payload Too Large',
@@ -140,7 +148,7 @@ export const dynamicBodyParser: RequestHandler = (req: any, res: any, next: any)
                 code: 'PAYLOAD_TOO_LARGE'
             });
         }
-        express.urlencoded({ extended: true, limit: safeLimit, verify: rawBodyBuffer })(req, res, next);
+        express.urlencoded({ extended: true, limit: safeLimit })(req, res, next);
     });
 };
 
