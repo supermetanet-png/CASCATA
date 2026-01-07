@@ -1,3 +1,4 @@
+
 import { RequestHandler } from 'express';
 import express from 'express';
 import { CascataRequest } from '../types.js';
@@ -5,39 +6,58 @@ import { systemPool } from '../config/main.js';
 import { parseBytes, formatBytes } from '../utils/index.js';
 import { RateLimitService } from '../../services/RateLimitService.js';
 
+// --- TRUSTED BUILDERS ---
+// Ferramentas No-Code que precisam ler o Swagger/OpenAPI antes de ter o contexto do projeto carregado.
+// Isso resolve o problema do "Preflight" (OPTIONS) falhar antes do resolveProject rodar.
+const TRUSTED_BUILDERS = [
+  'https://app.flutterflow.io',
+  'https://flutterflow.io',
+  'https://app.appsmith.com',
+  'https://editor.swagger.io',
+  'https://studio.apollographql.com'
+];
+
 export const dynamicCors: RequestHandler = (req: any, res: any, next: any) => {
     const origin = req.headers.origin;
+    
+    // Headers padrão para suportar PostgREST/Supabase Clients
     res.setHeader('Access-Control-Allow-Credentials', 'true');
     res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,PATCH,DELETE,OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type,Authorization,apikey,x-cascata-client,Prefer,Range,x-client-info,x-supabase-auth,content-profile,accept-profile,x-supabase-api-version,x-cascata-signature,x-cascata-event');
     res.setHeader('Access-Control-Expose-Headers', 'Content-Range, X-Total-Count, Link');
 
-    // 1. Pre-flight check / System check
-    if (!req.project) {
-        // Allow dashboard access if origin matches system domain (implicit trust for control plane)
-        // But do NOT reflect arbitrary origins.
+    // 1. TRUSTED BUILDERS BYPASS (Cirúrgico para FlutterFlow/AppSmith)
+    // Se a origem é uma ferramenta de construção confiável, liberamos o CORS imediatamente.
+    // A segurança real (leitura de dados) ainda é barrada se a flag 'schema_exposure' estiver off.
+    if (origin && TRUSTED_BUILDERS.includes(origin)) {
+        res.setHeader('Access-Control-Allow-Origin', origin);
         if (req.method === 'OPTIONS') return res.status(200).end();
         return next();
     }
 
-    // 2. Project Security Policy
+    // 2. Pre-flight check / System check padrão
+    if (!req.project) {
+        // Permitir acesso ao dashboard se a origem bater com o domínio do sistema (confiança implícita)
+        // Mas NÃO refletir origens arbitrárias.
+        if (req.method === 'OPTIONS') return res.status(200).end();
+        return next();
+    }
+
+    // 3. Project Security Policy (Carregado do Banco)
     const allowedOrigins = req.project.metadata?.allowed_origins || [];
     const safeOrigins = allowedOrigins.map((o: any) => typeof o === 'string' ? o : o.url);
     
     if (safeOrigins.length === 0) {
-        // SECURITY FIX: Do NOT reflect origin by default if list is empty.
-        // This prevents arbitrary sites from querying the API via browser.
-        // We only allow if it's explicitly null/star (Public API mode) or strict match.
-        // For development convenience, we allow localhost.
+        // MODO PÚBLICO (Development Convenience)
+        // Se a lista estiver vazia, permitimos localhost para desenvolvimento.
+        // NÃO liberamos '*' globalmente para manter Credentials=true funcionando.
         if (origin && (origin.includes('localhost') || origin.includes('127.0.0.1'))) {
              res.setHeader('Access-Control-Allow-Origin', origin);
         }
-        // In "Public Mode" (empty list), we prefer NOT to set A-C-A-O to '*', 
-        // because we use Credentials=true. This is a secure default.
-        // Users must explicitly add origins to metadata to enable CORS for their webapps.
     } 
     else {
-        // Strict Mode: Check Whitelist
+        // MODO ESTRITO (Production)
+        // Verifica Whitelist do Banco de Dados
         if (origin && safeOrigins.includes(origin)) {
             res.setHeader('Access-Control-Allow-Origin', origin);
         }

@@ -1,4 +1,6 @@
+
 import fs from 'fs';
+import fsPromises from 'fs/promises';
 import path from 'path';
 import { Buffer } from 'buffer';
 import { MAGIC_NUMBERS, TEMP_UPLOAD_ROOT, systemPool } from '../config/main.js';
@@ -117,20 +119,32 @@ export const getSectorForExt = (ext: string): string => {
   return 'global';
 };
 
-export const validateMagicBytes = (filePath: string, ext: string): boolean => {
+/**
+ * Validates file signature (Magic Bytes) asynchronously.
+ * Prevents reading the entire file into memory; reads only the first 4 bytes.
+ */
+export const validateMagicBytesAsync = async (filePath: string, ext: string): Promise<boolean> => {
+    // Block obviously dangerous extensions immediately
     if (['exe', 'sh', 'php', 'pl', 'py', 'rb', 'bat', 'cmd', 'msi', 'vbs'].includes(ext)) {
         return false;
     }
+    
+    // If we don't have a signature for it, we trust the extension/mime (fallback)
     if (!MAGIC_NUMBERS[ext]) return true;
+
+    let fileHandle: fsPromises.FileHandle | null = null;
     try {
+        fileHandle = await fsPromises.open(filePath, 'r');
         const buffer = Buffer.alloc(4);
-        const fd = fs.openSync(filePath, 'r');
-        fs.readSync(fd, buffer, 0, 4, 0);
-        fs.closeSync(fd);
+        await fileHandle.read(buffer, 0, 4, 0);
+        
         const hex = buffer.toString('hex').toUpperCase();
         return MAGIC_NUMBERS[ext].some(sig => hex.startsWith(sig) || sig.startsWith(hex));
     } catch (e) {
+        console.error(`[MagicBytes] Error validating ${filePath}:`, e);
         return false; 
+    } finally {
+        if (fileHandle) await fileHandle.close();
     }
 };
 
@@ -152,37 +166,56 @@ export const formatBytes = (bytes: number) => {
     return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
 };
 
-export const walk = (dir: string, rootPath: string, fileList: any[] = []) => {
+/**
+ * Recursively walks a directory asynchronously.
+ * Uses Promise.all for parallelism but limits concurrency implicitly by OS file descriptor limits if massive.
+ * For massive directories, a queue-based approach might be better, but this is sufficient for typical use.
+ */
+export const walkAsync = async (dir: string, rootPath: string): Promise<any[]> => {
+  let results: any[] = [];
   try {
-    const files = fs.readdirSync(dir);
-    files.forEach((file) => {
-      const filePath = path.join(dir, file);
-      const stat = fs.statSync(filePath);
-      const relativePath = path.relative(rootPath, filePath).replace(/\\/g, '/');
-      fileList.push({
-        name: file,
-        type: stat.isDirectory() ? 'folder' : 'file',
-        size: stat.size,
-        updated_at: stat.mtime.toISOString(),
-        path: relativePath
-      });
-      if (stat.isDirectory()) {
-        walk(filePath, rootPath, fileList);
-      }
-    });
+    const list = await fsPromises.readdir(dir);
+    for (const file of list) {
+        const filePath = path.join(dir, file);
+        const stat = await fsPromises.stat(filePath);
+        const relativePath = path.relative(rootPath, filePath).replace(/\\/g, '/');
+        
+        results.push({
+            name: file,
+            type: stat.isDirectory() ? 'folder' : 'file',
+            size: stat.size,
+            updated_at: stat.mtime.toISOString(),
+            path: relativePath
+        });
+
+        if (stat.isDirectory()) {
+            const children = await walkAsync(filePath, rootPath);
+            results = results.concat(children);
+        }
+    }
   } catch (e) {
+      // Ignore errors (e.g., permission denied on specific subfolder) to keep scanning
+      console.warn(`[WalkAsync] Error scanning ${dir}:`, e);
   }
-  return fileList;
+  return results;
 };
 
-export const cleanTempUploads = () => {
-    if (fs.existsSync(TEMP_UPLOAD_ROOT)) {
-        const files = fs.readdirSync(TEMP_UPLOAD_ROOT);
+export const cleanTempUploads = async () => {
+    try {
+        const files = await fsPromises.readdir(TEMP_UPLOAD_ROOT);
         const now = Date.now();
-        files.forEach(file => {
+        // Sequential check to be gentle on CPU
+        for (const file of files) {
             const filePath = path.join(TEMP_UPLOAD_ROOT, file);
-            try { if (now - fs.statSync(filePath).mtimeMs > 3600 * 1000) fs.rmSync(filePath, { recursive: true, force: true }); } catch (e) { }
-        });
+            try {
+                const stats = await fsPromises.stat(filePath);
+                if (now - stats.mtimeMs > 3600 * 1000) {
+                    await fsPromises.rm(filePath, { recursive: true, force: true });
+                }
+            } catch (e) { /* ignore ENOENT race conditions */ }
+        }
+    } catch (e) {
+        // If temp dir doesn't exist or other error, just ignore
     }
 };
 

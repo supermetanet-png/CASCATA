@@ -53,9 +53,10 @@ router.patch('/storage/buckets/:name', StorageController.renameBucket as any);
 router.delete('/storage/buckets/:name', StorageController.deleteBucket as any);
 
 // Storage Objects & Folders
-router.post('/storage/:bucket/folder', StorageController.createFolder as any); // Rota adicionada/corrigida
+router.post('/storage/:bucket/sign', StorageController.signUpload as any); // NEW: Negotiation Route
+router.post('/storage/:bucket/folder', StorageController.createFolder as any); 
 router.post('/storage/:bucket/upload', upload.single('file') as any, StorageController.uploadFile as any);
-router.get('/storage/:bucket/list', StorageController.listFiles as any); // Separado list de search
+router.get('/storage/:bucket/list', StorageController.listFiles as any); 
 router.get('/storage/search', StorageController.search as any);
 router.get('/storage/:bucket/object/*', StorageController.serveFile as any);
 router.post('/storage/move', StorageController.moveFiles as any);

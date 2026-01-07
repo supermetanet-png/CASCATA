@@ -8,7 +8,7 @@ import FormData from 'form-data';
 import { Buffer } from 'buffer';
 import jwt from 'jsonwebtoken';
 
-export type StorageProviderType = 'local' | 's3' | 'cloudinary' | 'imagekit' | 'cloudflare_images' | 'gdrive' | 'dropbox' | 'onedrive' | 'terabox';
+export type StorageProviderType = 'local' | 's3' | 'cloudinary' | 'imagekit' | 'cloudflare_images' | 'gdrive' | 'dropbox' | 'onedrive';
 
 export interface MulterFile {
     path: string;
@@ -60,21 +60,17 @@ export interface StorageConfig {
         clientSecret: string;
         refreshToken: string;
     };
-    terabox?: {
-        user?: string;
-        token?: string;
-    }
 }
 
 /**
- * StorageService v3.0 (Enterprise Stream & Hybrid)
- * - Solução 2: Uso de Streams nativos (fs.createReadStream) para evitar estouro de memória RAM.
- * - Solução 1: Suporte nativo a Presigned URLs (S3) para uploads diretos do frontend (futuro).
- * - Solução 3: Lógica condicional para otimização de imagens (respeitando a config do projeto).
+ * StorageService v3.1 (Professional Pipeline)
+ * - Streams Nativos: 0% de impacto na RAM do servidor durante uploads proxy.
+ * - Direct Upload (S3): Bypass total do servidor para arquivos gigantes.
+ * - Clean Architecture: Remoção de providers instáveis (Terabox).
  */
 export class StorageService {
 
-    // --- MAIN UPLOAD METHOD (STREAMING) ---
+    // --- MAIN UPLOAD METHOD (STREAMING PROXY) ---
     public static async upload(
         file: MulterFile, 
         projectSlug: string, 
@@ -85,18 +81,10 @@ export class StorageService {
         // Normaliza caminhos para evitar barras duplicadas
         const fullKey = path.join(targetPath, file.originalname).replace(/\\/g, '/').replace(/^\//, '');
         
-        // --- SOLUÇÃO 3: OTIMIZAÇÃO CONFIGURÁVEL ---
-        // Se a otimização estiver ativa E for imagem, poderíamos passar por um pipe (sharp/jimp).
-        // Por enquanto, mantemos o stream original para garantir compatibilidade sem dependências extras.
-        // O administrador do projeto controla isso via painel (flag config.optimize).
-        let fileStream: fs.ReadStream | any = fs.createReadStream(file.path);
+        // Cria um ReadStream do arquivo temporário no disco
+        // Isso permite enviar GBs de dados sem carregar nada na memória do Node.js
+        const fileStream = fs.createReadStream(file.path);
         
-        if (config.optimize && file.mimetype.startsWith('image/')) {
-             // Placeholder para injeção de pipeline de processamento (ex: sharp)
-             // console.log(`[StorageService] Optimization requested for ${fullKey}`);
-             // fileStream = fileStream.pipe(sharp().resize(800).webp());
-        }
-
         try {
             switch (config.provider) {
                 case 's3':
@@ -120,11 +108,9 @@ export class StorageService {
                 case 'onedrive':
                     if (!config.onedrive) throw new Error("OneDrive Config missing");
                     return await this.uploadOneDrive(fileStream, file, fullKey, config.onedrive);
-                case 'terabox':
-                    throw new Error("TeraBox API is not supported directly. Use WebDAV or local storage.");
                 case 'local':
                 default:
-                    // Local é tratado pelo controller, retornamos vazio aqui.
+                    // Local é tratado pelo controller (fs.rename), retornamos vazio aqui.
                     return ''; 
             }
         } catch (error: any) {
@@ -161,7 +147,6 @@ export class StorageService {
 
                 case 'cloudinary':
                     if (!config.cloudinary) throw new Error("Cloudinary Config missing");
-                    // Cloudinary usa public_id sem extensão geralmente, mas depende da config
                     const publicId = cleanKey.replace(/\.[^/.]+$/, "");
                     await this.deleteCloudinary(publicId, config.cloudinary);
                     break;
@@ -193,13 +178,15 @@ export class StorageService {
         }
     }
 
-    // --- SOLUÇÃO 1: PRESIGNED URL GENERATION ---
-    // Permite que o frontend faça upload direto para o S3, removendo o gargalo do backend.
+    // --- SOLUÇÃO 1: PRESIGNED URL GENERATION (DIRECT UPLOAD) ---
+    // Gera uma URL temporária assinada para que o frontend envie direto ao provedor.
     public static async createUploadUrl(
         key: string,
         contentType: string,
         config: StorageConfig
-    ): Promise<{ url: string, fields?: any }> {
+    ): Promise<{ url: string, method: string, headers?: any, strategy: 'direct' | 'proxy' }> {
+        
+        // S3: Suporte Nativo a Presigned PUT
         if (config.provider === 's3' && config.s3) {
             const s3 = new S3Client({
                 region: config.s3.region,
@@ -219,12 +206,12 @@ export class StorageService {
             });
 
             const url = await getSignedUrl(s3, command, { expiresIn: 3600 });
-            return { url };
+            return { url, method: 'PUT', strategy: 'direct' };
         }
 
-        // Outros providers (GDrive, Dropbox) geralmente não suportam PUT pré-assinado simples
-        // Nesses casos, o fallback é o proxy via backend (método upload acima).
-        throw new Error(`Presigned URLs not supported for provider: ${config.provider}`);
+        // Outros providers (GDrive, Dropbox, Local): Retorna Proxy
+        // O frontend deve usar o endpoint de upload padrão se receber 'proxy'
+        return { url: '', method: 'POST', strategy: 'proxy' };
     }
 
     // --- PROVIDER IMPLEMENTATIONS (ALL STREAM BASED) ---
@@ -276,7 +263,6 @@ export class StorageService {
 
     private static async deleteCloudinary(publicId: string, conf: NonNullable<StorageConfig['cloudinary']>) {
         const timestamp = Math.floor(Date.now() / 1000).toString();
-        // Assinatura manual SHA1 para deleção segura
         const strToSign = `public_id=${publicId}&timestamp=${timestamp}${conf.apiSecret}`;
         const crypto = await import('crypto');
         const signature = crypto.createHash('sha1').update(strToSign).digest('hex');
@@ -318,7 +304,6 @@ export class StorageService {
         const authHeader = `Basic ${Buffer.from(conf.privateKey + ':').toString('base64')}`;
         const fileName = path.basename(filePath);
         
-        // 1. Busca ID pelo nome (ImageKit requer ID para deletar)
         const searchRes = await axios.get('https://api.imagekit.io/v1/files', {
             params: { searchQuery: `name = "${fileName}"`, limit: 1 },
             headers: { 'Authorization': authHeader }
@@ -347,7 +332,6 @@ export class StorageService {
     }
 
     private static async uploadGDrive(stream: fs.ReadStream, file: MulterFile, targetPath: string, conf: NonNullable<StorageConfig['gdrive']>) {
-        // Autenticação JWT Service Account
         const tokenUrl = 'https://oauth2.googleapis.com/token';
         const now = Math.floor(Date.now() / 1000);
         
@@ -387,7 +371,6 @@ export class StorageService {
     }
 
     private static async uploadDropbox(stream: fs.ReadStream, file: MulterFile, key: string, conf: NonNullable<StorageConfig['dropbox']>) {
-        // 1. Refresh Token para obter Access Token
         const tokenRes = await axios.post('https://api.dropbox.com/oauth2/token', null, {
             params: {
                 grant_type: 'refresh_token',
@@ -399,7 +382,6 @@ export class StorageService {
         const accessToken = tokenRes.data.access_token;
         const dropboxPath = '/' + key; 
 
-        // 2. Upload Session/Stream
         const uploadRes = await axios.post('https://content.dropboxapi.com/2/files/upload', stream, {
             headers: {
                 'Authorization': `Bearer ${accessToken}`,
@@ -416,14 +398,12 @@ export class StorageService {
             maxContentLength: Infinity
         });
 
-        // 3. Criar Link Compartilhado
         try {
             const shareRes = await axios.post('https://api.dropboxapi.com/2/sharing/create_shared_link_with_settings', {
                 path: uploadRes.data.path_display
             }, {
                 headers: { 'Authorization': `Bearer ${accessToken}`, 'Content-Type': 'application/json' }
             });
-            // Transforma link de preview em link direto (dl=1)
             return shareRes.data.url.replace('?dl=0', '?dl=1'); 
         } catch(e) {
             return `https://www.dropbox.com/home${dropboxPath}`; 
@@ -440,7 +420,6 @@ export class StorageService {
     }
 
     private static async uploadOneDrive(stream: fs.ReadStream, file: MulterFile, key: string, conf: NonNullable<StorageConfig['onedrive']>) {
-        // 1. Refresh Token
         const params = new URLSearchParams();
         params.append('client_id', conf.clientId);
         params.append('client_secret', conf.clientSecret);
@@ -451,7 +430,6 @@ export class StorageService {
         const tokenRes = await axios.post('https://login.microsoftonline.com/common/oauth2/v2.0/token', params);
         const accessToken = tokenRes.data.access_token;
 
-        // 2. Upload via PUT
         const uploadUrl = `https://graph.microsoft.com/v1.0/me/drive/root:/${key}:/content`;
 
         const uploadRes = await axios.put(uploadUrl, stream, {

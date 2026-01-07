@@ -9,7 +9,7 @@ import {
   Grid, List, X, Move, Share2, Settings2, Shield, Eye,
   Check, Square, CheckSquare, Zap, ShieldAlert, Lock,
   MousePointer2, CornerUpRight, Cloud, Server, Box, Globe,
-  Save, Database, Key, RefreshCw, Wand2
+  Save, Database, Key, RefreshCw, Wand2, AlertTriangle, FileCode
 } from 'lucide-react';
 
 interface StorageItem {
@@ -45,9 +45,11 @@ const STORAGE_PROVIDERS = [
   { id: 'imagekit', name: 'ImageKit', icon: ImageIcon, desc: 'CDN de imagem em tempo real.' },
   { id: 'gdrive', name: 'Google Drive', icon: HardDrive, desc: 'Integração via Google Workspace API.' },
   { id: 'onedrive', name: 'OneDrive', icon: Cloud, desc: 'Microsoft Graph API Storage.' },
-  { id: 'dropbox', name: 'Dropbox', icon: Box, desc: 'Armazenamento de arquivos simples.' },
-  { id: 'terabox', name: 'TeraBox', icon: HardDrive, desc: 'Large scale storage API.' }
+  { id: 'dropbox', name: 'Dropbox', icon: Box, desc: 'Armazenamento de arquivos simples.' }
 ];
+
+// Physical Limit Hardcoded in Nginx/Node
+const PHYSICAL_LIMIT_BYTES = 100 * 1024 * 1024; // 100MB
 
 const StorageExplorer: React.FC<{ projectId: string }> = ({ projectId }) => {
   const [buckets, setBuckets] = useState<any[]>([]);
@@ -56,6 +58,7 @@ const StorageExplorer: React.FC<{ projectId: string }> = ({ projectId }) => {
   const [items, setItems] = useState<StorageItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [isUploading, setIsUploading] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
   
@@ -74,7 +77,7 @@ const StorageExplorer: React.FC<{ projectId: string }> = ({ projectId }) => {
   const [showSettings, setShowSettings] = useState(false);
   const [showMoveModal, setShowMoveModal] = useState(false);
   const [showVerifyModal, setShowVerifyModal] = useState(false);
-  const [showConnectModal, setShowConnectModal] = useState(false); // CONNECT MODAL STATE
+  const [showConnectModal, setShowConnectModal] = useState(false);
 
   const [expandedSector, setExpandedSector] = useState<string | null>(null);
   const [newName, setNewName] = useState('');
@@ -188,7 +191,11 @@ const StorageExplorer: React.FC<{ projectId: string }> = ({ projectId }) => {
     } else {
       const initial: any = {};
       SECTOR_DEFINITIONS.forEach(s => {
-        initial[s.id] = { max_size: s.id === 'global' ? '100MB' : '10MB', allowed_exts: s.defaults };
+        initial[s.id] = { 
+            max_size: s.id === 'global' ? '100MB' : '10MB', // Internal
+            max_size_direct: '5GB', // External Default
+            allowed_exts: s.defaults 
+        };
       });
       setGovernance(initial);
     }
@@ -217,14 +224,24 @@ const StorageExplorer: React.FC<{ projectId: string }> = ({ projectId }) => {
         toggleSelect(item.path);
         return;
     }
-    setSelectedItems(new Set([item.path]));
+    
+    if (item.type === 'folder') {
+        // Folder: Single click navigates
+        setCurrentPath(item.path);
+        setSearchQuery('');
+        setSelectedItems(new Set()); // Clear selection on navigate
+    } else {
+        // File: Single click selects
+        setSelectedItems(new Set([item.path]));
+    }
   };
 
   const handleItemDoubleClick = (item: StorageItem) => {
       if (item.type === 'folder') {
-          setCurrentPath(item.path);
-          setSearchQuery('');
+          // Folder: Double click selects
+          toggleSelect(item.path);
       } else {
+          // File: Double click opens/downloads
           window.open(getSecureDownloadLink(item.path), '_blank');
       }
   };
@@ -245,27 +262,63 @@ const StorageExplorer: React.FC<{ projectId: string }> = ({ projectId }) => {
       }
   };
 
-  // --- UPLOAD ---
+  // --- HYBRID UPLOAD (Direct vs Proxy) ---
   const handleUpload = async (files: FileList | null, targetPath: string = currentPath, targetBucket: string = selectedBucket!) => {
       if (!files || !targetBucket) return;
       setIsUploading(true);
       setError(null);
+      
       try {
+          let successCount = 0;
+          
           for (let i = 0; i < files.length; i++) {
               const file = files[i];
-              if (file) {
+              setUploadProgress(Math.round(((i) / files.length) * 100));
+
+              // 1. Negotiate (Get Strategy)
+              const signRes = await fetchWithAuth(`/api/data/${projectId}/storage/${targetBucket}/sign`, {
+                  method: 'POST',
+                  body: JSON.stringify({ 
+                      name: file.name, 
+                      type: file.type, 
+                      size: file.size, 
+                      path: targetPath 
+                  })
+              });
+
+              if (signRes.error) throw new Error(signRes.error);
+
+              // 2. Execute based on Strategy
+              if (signRes.strategy === 'direct') {
+                  // Direct Upload (PUT to S3/Cloud)
+                  await fetch(signRes.url, {
+                      method: signRes.method,
+                      headers: signRes.fields || { 'Content-Type': file.type },
+                      body: file
+                  });
+              } else {
+                  // Proxy Upload (Standard Multipart)
                   const formData = new FormData();
                   formData.append('file', file);
                   formData.append('path', targetPath);
-                  await fetchWithAuth(`/api/data/${projectId}/storage/${targetBucket}/upload`, { method: 'POST', body: formData });
+                  await fetchWithAuth(`/api/data/${projectId}/storage/${targetBucket}/upload`, { 
+                      method: 'POST', 
+                      body: formData 
+                  });
               }
+              successCount++;
           }
+          
           if (targetBucket === selectedBucket) {
               fetchItems();
           }
-          setSuccess("Upload concluído.");
-      } catch (e: any) { setError(e.message); }
-      finally { setIsUploading(false); }
+          setSuccess(`${successCount} arquivos enviados.`);
+      } catch (e: any) { 
+          setError(e.message || "Erro no upload."); 
+      } finally { 
+          setIsUploading(false);
+          setUploadProgress(0); 
+      }
   };
 
   // --- DRAG & DROP LOGIC ---
@@ -430,9 +483,10 @@ const StorageExplorer: React.FC<{ projectId: string }> = ({ projectId }) => {
   };
 
   // --- GOVERNANCE UI HELPERS ---
-  const updateSectorSize = (sectorId: string, val: string, unit: string) => {
+  const updateSectorSize = (sectorId: string, val: string, unit: string, isDirect: boolean = false) => {
     const combined = `${val}${unit}`;
-    setGovernance({ ...governance, [sectorId]: { ...governance[sectorId], max_size: combined } });
+    const key = isDirect ? 'max_size_direct' : 'max_size';
+    setGovernance({ ...governance, [sectorId]: { ...governance[sectorId], [key]: combined } });
   };
 
   const parseSizeValue = (str: string) => {
@@ -443,6 +497,14 @@ const StorageExplorer: React.FC<{ projectId: string }> = ({ projectId }) => {
   const parseSizeUnit = (str: string) => {
     const match = str?.match(/([a-zA-Z]+)$/);
     return match ? match[1] : 'MB';
+  };
+
+  const checkPhysicalLimit = (valStr: string) => {
+      const val = parseFloat(parseSizeValue(valStr) || '0');
+      const unit = parseSizeUnit(valStr);
+      const multipliers: any = { 'B': 1, 'KB': 1024, 'MB': 1024*1024, 'GB': 1024*1024*1024 };
+      const bytes = val * (multipliers[unit.toUpperCase()] || 1);
+      return bytes > PHYSICAL_LIMIT_BYTES;
   };
 
   const addCustomExtension = (sectorId: string) => {
@@ -687,7 +749,7 @@ const StorageExplorer: React.FC<{ projectId: string }> = ({ projectId }) => {
         </main>
       </div>
 
-      {/* SETTINGS MODAL */}
+      {/* SETTINGS MODAL (GOVERNANCE) */}
       {showSettings && (
         <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-xl z-[400] flex items-center justify-center p-8 animate-in fade-in duration-300">
           <div className="bg-white rounded-[4rem] w-full max-w-5xl max-h-[90vh] overflow-hidden flex flex-col shadow-2xl border border-slate-100 animate-in zoom-in-95">
@@ -719,6 +781,10 @@ const StorageExplorer: React.FC<{ projectId: string }> = ({ projectId }) => {
                 const hasMatch = sector.exts.some(ext => ext.includes(searchClean));
                 if (governanceSearch && !hasMatch && sector.id !== 'global') return null;
 
+                const internalValStr = governance[sector.id]?.max_size || '10MB';
+                const externalValStr = governance[sector.id]?.max_size_direct || '5GB';
+                const isOverPhysical = checkPhysicalLimit(internalValStr);
+
                 return (
                   <div key={sector.id} className="bg-slate-50 border border-slate-100 rounded-[2.5rem] overflow-hidden transition-all group">
                      <button onClick={() => { setExpandedSector(expandedSector === sector.id ? null : sector.id); }} className="w-full p-8 flex items-center justify-between text-left hover:bg-white transition-colors">
@@ -726,68 +792,103 @@ const StorageExplorer: React.FC<{ projectId: string }> = ({ projectId }) => {
                          <div className={`w-14 h-14 rounded-2xl flex items-center justify-center shadow-inner ${expandedSector === sector.id || governanceSearch ? 'bg-indigo-600 text-white' : 'bg-slate-100 text-slate-400'}`}><Zap size={24} /></div>
                          <div><h4 className="text-xl font-black text-slate-900 tracking-tight">{sector.label}</h4><p className="text-[11px] text-slate-400 font-medium uppercase tracking-widest">{sector.desc}</p></div>
                        </div>
-                       <div className="flex items-center gap-8">
-                          <div onClick={e => e.stopPropagation()} className="flex items-center gap-2 bg-white border border-slate-200 rounded-xl p-1">
-                             <input 
-                              value={parseSizeValue(governance[sector.id]?.max_size || '10MB')}
-                              onChange={(e) => updateSectorSize(sector.id, e.target.value, parseSizeUnit(governance[sector.id]?.max_size || 'MB'))}
-                              className="w-16 text-center text-xs font-black text-indigo-600 outline-none"
-                             />
-                             <select 
-                              value={parseSizeUnit(governance[sector.id]?.max_size || 'MB')}
-                              onChange={(e) => updateSectorSize(sector.id, parseSizeValue(governance[sector.id]?.max_size || '10MB'), e.target.value)}
-                              className="bg-slate-100 rounded-lg text-[9px] font-bold text-slate-500 outline-none px-2 py-1"
-                             >
-                               <option value="B">Bytes</option><option value="KB">Kilobytes</option><option value="MB">Megabytes</option><option value="GB">Gigabytes</option><option value="TB">Terabytes</option>
-                             </select>
-                          </div>
-                          <ChevronDown size={20} className={`text-slate-300 transition-transform ${expandedSector === sector.id || governanceSearch ? 'rotate-180' : ''}`} />
-                       </div>
+                       <ChevronDown size={20} className={`text-slate-300 transition-transform ${expandedSector === sector.id || governanceSearch ? 'rotate-180' : ''}`} />
                      </button>
 
-                     {(expandedSector === sector.id || (governanceSearch && hasMatch)) && sector.id !== 'global' && (
+                     {(expandedSector === sector.id || (governanceSearch && hasMatch)) && (
                        <div className="p-8 pt-0 border-t border-slate-100 bg-white/50 animate-in slide-in-from-top-2">
-                          <div className="flex items-center justify-between mb-6">
-                             <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Whitelisted Terminations</span>
-                             <div className="flex gap-4">
-                                <button onClick={() => setGovernance({ ...governance, [sector.id]: { ...governance[sector.id], allowed_exts: sector.exts } })} className="text-[10px] font-black text-indigo-600 uppercase hover:underline">Select All</button>
-                                <button onClick={() => setGovernance({ ...governance, [sector.id]: { ...governance[sector.id], allowed_exts: [] } })} className="text-[10px] font-black text-rose-600 uppercase hover:underline">Clear All</button>
-                             </div>
-                          </div>
                           
-                          {/* Custom Extension Adder */}
-                          <div className="mb-4 flex items-center gap-3">
-                             <input 
-                               value={newCustomExt}
-                               onChange={(e) => setNewCustomExt(e.target.value)}
-                               placeholder="Add custom ext (e.g. .thales)"
-                               className="bg-white border border-slate-200 rounded-xl px-4 py-2 text-xs font-bold outline-none focus:ring-2 focus:ring-indigo-500/10"
-                               onKeyDown={(e) => e.key === 'Enter' && addCustomExtension(sector.id)}
-                             />
-                             <button onClick={() => addCustomExtension(sector.id)} className="bg-indigo-600 text-white p-2 rounded-lg hover:bg-indigo-700 transition-colors"><Plus size={14}/></button>
+                          {/* LIMITS SECTION (DUAL) */}
+                          <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-8 bg-white p-6 rounded-3xl border border-slate-100">
+                              {/* Internal Limit */}
+                              <div>
+                                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest flex items-center gap-2 mb-2">
+                                      <Server size={12}/> Internal Limit (Proxy)
+                                      {isOverPhysical && <span className="text-rose-500 flex items-center gap-1" title="Exceeds Nginx Physical Cap"><AlertTriangle size={10}/> High Risk</span>}
+                                  </label>
+                                  <div className={`flex items-center gap-2 bg-slate-50 border rounded-xl p-1 ${isOverPhysical ? 'border-rose-300 bg-rose-50' : 'border-slate-200'}`}>
+                                     <input 
+                                      value={parseSizeValue(internalValStr)}
+                                      onChange={(e) => updateSectorSize(sector.id, e.target.value, parseSizeUnit(internalValStr), false)}
+                                      className="w-full text-center text-xs font-black text-indigo-600 outline-none bg-transparent py-2"
+                                     />
+                                     <select 
+                                      value={parseSizeUnit(internalValStr)}
+                                      onChange={(e) => updateSectorSize(sector.id, parseSizeValue(internalValStr), e.target.value, false)}
+                                      className="bg-white rounded-lg text-[9px] font-bold text-slate-500 outline-none px-2 py-1 shadow-sm border border-slate-100 h-8"
+                                     >
+                                       <option value="B">Bytes</option><option value="KB">KB</option><option value="MB">MB</option><option value="GB">GB</option>
+                                     </select>
+                                  </div>
+                                  <p className="text-[9px] text-slate-400 mt-2 leading-relaxed">Limit for files passing through the server RAM/Disk. Max safe: 100MB.</p>
+                              </div>
+
+                              {/* External Limit */}
+                              <div>
+                                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest flex items-center gap-2 mb-2"><Cloud size={12}/> External Limit (Direct)</label>
+                                  <div className="flex items-center gap-2 bg-slate-50 border border-slate-200 rounded-xl p-1">
+                                     <input 
+                                      value={parseSizeValue(externalValStr)}
+                                      onChange={(e) => updateSectorSize(sector.id, e.target.value, parseSizeUnit(externalValStr), true)}
+                                      className="w-full text-center text-xs font-black text-emerald-600 outline-none bg-transparent py-2"
+                                     />
+                                     <select 
+                                      value={parseSizeUnit(externalValStr)}
+                                      onChange={(e) => updateSectorSize(sector.id, parseSizeValue(externalValStr), e.target.value, true)}
+                                      className="bg-white rounded-lg text-[9px] font-bold text-slate-500 outline-none px-2 py-1 shadow-sm border border-slate-100 h-8"
+                                     >
+                                       <option value="B">Bytes</option><option value="KB">KB</option><option value="MB">MB</option><option value="GB">GB</option><option value="TB">TB</option>
+                                     </select>
+                                  </div>
+                                  <p className="text-[9px] text-slate-400 mt-2 leading-relaxed">Limit for presigned uploads directly to S3/Cloud. Virtually unlimited.</p>
+                              </div>
                           </div>
 
-                          <div className="grid grid-cols-4 md:grid-cols-6 lg:grid-cols-8 gap-3">
-                             {Array.from(new Set([...sector.exts, ...(governance[sector.id]?.allowed_exts || [])]))
-                               .filter(ext => ext.includes(governanceSearch.toLowerCase().replace(/^\./, '')))
-                               .map(ext => {
-                                 const isActive = governance[sector.id]?.allowed_exts?.includes(ext);
-                                 return (
-                                   <button 
-                                    key={ext} 
-                                    onClick={() => {
-                                      const current = governance[sector.id]?.allowed_exts || [];
-                                      const next = current.includes(ext) ? current.filter((e:string) => e !== ext) : [...current, ext];
-                                      setGovernance({ ...governance, [sector.id]: { ...governance[sector.id], allowed_exts: next } });
-                                    }}
-                                    className={`flex items-center justify-center gap-2 py-3 rounded-xl border transition-all ${isActive ? 'bg-indigo-600 text-white border-indigo-700 shadow-lg' : 'bg-white text-slate-400 border-slate-200 hover:border-slate-300'}`}
-                                   >
-                                     {isActive ? <CheckSquare size={12} /> : <Square size={12} />}
-                                     <span className="text-[10px] font-black uppercase tracking-tighter">.{ext}</span>
-                                   </button>
-                                 );
-                             })}
-                          </div>
+                          {sector.id !== 'global' && (
+                              <>
+                                <div className="flex items-center justify-between mb-6">
+                                    <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Whitelisted Terminations</span>
+                                    <div className="flex gap-4">
+                                        <button onClick={() => setGovernance({ ...governance, [sector.id]: { ...governance[sector.id], allowed_exts: sector.exts } })} className="text-[10px] font-black text-indigo-600 uppercase hover:underline">Select All</button>
+                                        <button onClick={() => setGovernance({ ...governance, [sector.id]: { ...governance[sector.id], allowed_exts: [] } })} className="text-[10px] font-black text-rose-600 uppercase hover:underline">Clear All</button>
+                                    </div>
+                                </div>
+                                
+                                {/* Custom Extension Adder */}
+                                <div className="mb-4 flex items-center gap-3">
+                                    <input 
+                                    value={newCustomExt}
+                                    onChange={(e) => setNewCustomExt(e.target.value)}
+                                    placeholder="Add custom ext (e.g. .thales)"
+                                    className="bg-white border border-slate-200 rounded-xl px-4 py-2 text-xs font-bold outline-none focus:ring-2 focus:ring-indigo-500/10"
+                                    onKeyDown={(e) => e.key === 'Enter' && addCustomExtension(sector.id)}
+                                    />
+                                    <button onClick={() => addCustomExtension(sector.id)} className="bg-indigo-600 text-white p-2 rounded-lg hover:bg-indigo-700 transition-colors"><Plus size={14}/></button>
+                                </div>
+
+                                <div className="grid grid-cols-4 md:grid-cols-6 lg:grid-cols-8 gap-3">
+                                    {Array.from(new Set([...sector.exts, ...(governance[sector.id]?.allowed_exts || [])]))
+                                    .filter(ext => ext.includes(governanceSearch.toLowerCase().replace(/^\./, '')))
+                                    .map(ext => {
+                                        const isActive = governance[sector.id]?.allowed_exts?.includes(ext);
+                                        return (
+                                        <button 
+                                            key={ext} 
+                                            onClick={() => {
+                                            const current = governance[sector.id]?.allowed_exts || [];
+                                            const next = current.includes(ext) ? current.filter((e:string) => e !== ext) : [...current, ext];
+                                            setGovernance({ ...governance, [sector.id]: { ...governance[sector.id], allowed_exts: next } });
+                                            }}
+                                            className={`flex items-center justify-center gap-2 py-3 rounded-xl border transition-all ${isActive ? 'bg-indigo-600 text-white border-indigo-700 shadow-lg' : 'bg-white text-slate-400 border-slate-200 hover:border-slate-300'}`}
+                                        >
+                                            {isActive ? <CheckSquare size={12} /> : <Square size={12} />}
+                                            <span className="text-[10px] font-black uppercase tracking-tighter">.{ext}</span>
+                                        </button>
+                                        );
+                                    })}
+                                </div>
+                              </>
+                          )}
                        </div>
                      )}
                   </div>
@@ -962,14 +1063,6 @@ const StorageExplorer: React.FC<{ projectId: string }> = ({ projectId }) => {
                                 <div><label className="text-[10px] font-black uppercase text-slate-400">Client ID / App Key</label><input value={storageConfig[activeConfigTab]?.clientId || ''} onChange={e => setStorageConfig({...storageConfig, [activeConfigTab]: {...storageConfig[activeConfigTab], clientId: e.target.value}})} className="w-full p-3 bg-slate-50 rounded-xl text-sm font-bold border-none outline-none"/></div>
                                 <div><label className="text-[10px] font-black uppercase text-slate-400">Client Secret / App Secret</label><input type="password" value={storageConfig[activeConfigTab]?.clientSecret || ''} onChange={e => setStorageConfig({...storageConfig, [activeConfigTab]: {...storageConfig[activeConfigTab], clientSecret: e.target.value}})} className="w-full p-3 bg-slate-50 rounded-xl text-sm font-bold border-none outline-none"/></div>
                                 <div><label className="text-[10px] font-black uppercase text-slate-400">Refresh Token (Long Lived)</label><input type="password" value={storageConfig[activeConfigTab]?.refreshToken || ''} onChange={e => setStorageConfig({...storageConfig, [activeConfigTab]: {...storageConfig[activeConfigTab], refreshToken: e.target.value}})} className="w-full p-3 bg-slate-50 rounded-xl text-sm font-bold border-none outline-none"/></div>
-                             </div>
-                        )}
-
-                        {activeConfigTab === 'terabox' && (
-                             <div className="space-y-4">
-                                <div className="p-4 bg-amber-50 border border-amber-100 rounded-xl text-xs text-amber-800 font-medium">Warning: TeraBox API support is experimental/limited. Use WebDAV credentials if available.</div>
-                                <div><label className="text-[10px] font-black uppercase text-slate-400">User ID / API Key</label><input value={storageConfig.terabox?.user || ''} onChange={e => setStorageConfig({...storageConfig, terabox: {...storageConfig.terabox, user: e.target.value}})} className="w-full p-3 bg-slate-50 rounded-xl text-sm font-bold border-none outline-none"/></div>
-                                <div><label className="text-[10px] font-black uppercase text-slate-400">Secret Token</label><input type="password" value={storageConfig.terabox?.token || ''} onChange={e => setStorageConfig({...storageConfig, terabox: {...storageConfig.terabox, token: e.target.value}})} className="w-full p-3 bg-slate-50 rounded-xl text-sm font-bold border-none outline-none"/></div>
                              </div>
                         )}
 
