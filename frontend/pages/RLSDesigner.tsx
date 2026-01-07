@@ -4,7 +4,8 @@ import {
   Shield, Play, Plus, X, Save, ArrowLeft, Loader2, 
   User, Database, Lock, Eye, CheckCircle2, GripVertical, 
   Trash2, Copy, GitBranch, Zap, Box, Key, AlignLeft, MousePointer2,
-  ChevronDown, ShieldCheck
+  ChevronDown, ShieldCheck, Link as LinkIcon, Layers, Workflow,
+  FileJson, BookOpen, AlertTriangle, ArrowRight, CheckSquare
 } from 'lucide-react';
 
 interface RLSDesignerProps {
@@ -14,51 +15,86 @@ interface RLSDesignerProps {
   onBack: () => void;
 }
 
-type BlockType = 'auth' | 'column' | 'logic' | 'value' | 'comparator';
+// --- TYPES ---
 
-interface Block {
-  id: string;
-  type: BlockType;
-  category: 'auth' | 'data' | 'logic' | 'static';
-  label: string;
-  value: string;
-  isContainer?: boolean; // For AND/OR groups
-  parentId?: string;
+type LogicOperator = 'AND' | 'OR';
+type Comparator = '=' | '!=' | '>' | '<' | 'IN' | 'IS';
+
+interface ForeignKey {
+  column: string;
+  foreignTable: string;
+  foreignColumn: string;
 }
 
 interface LogicNode {
   id: string;
-  type: 'group' | 'condition';
-  operator?: 'AND' | 'OR'; // If group
-  field?: string; // If condition
-  comparator?: string; // If condition
-  value?: string; // If condition
-  children?: LogicNode[]; // If group
+  type: 'group' | 'condition' | 'relation'; // 'relation' handles EXISTS(...)
+  
+  // Group Props
+  operator?: LogicOperator;
+  children?: LogicNode[];
+  
+  // Condition Props
+  field?: string;
+  comparator?: Comparator;
+  value?: string;
+  valueType?: 'static' | 'dynamic' | 'auth'; // 'auth.uid()' etc
+  
+  // Relation Props (For concatenated checks)
+  relationTable?: string;
+  relationLocalKey?: string;
+  relationForeignKey?: string;
 }
 
-// Helper robusto para gerar UUIDs em ambientes HTTP/HTTPS
-const getUUID = () => {
-  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
-    try { return crypto.randomUUID(); } catch(e) { /* ignore */ }
+// --- UTILS ---
+
+const getUUID = () => Math.random().toString(36).substring(2, 15);
+
+// Presets Library
+const PRESETS = {
+  OWNER_ONLY: {
+    name: 'Owner Only',
+    desc: 'Users can only access their own data.',
+    tree: {
+      id: 'root', type: 'group', operator: 'AND', children: [
+        { id: 'p1', type: 'condition', field: 'user_id', comparator: '=', value: 'auth.uid()', valueType: 'auth' }
+      ]
+    }
+  },
+  PUBLIC_READ: {
+    name: 'Public Read',
+    desc: 'Anyone can read, nobody can write.',
+    tree: {
+      id: 'root', type: 'group', operator: 'AND', children: [
+        { id: 'p1', type: 'condition', field: 'true', comparator: '', value: '', valueType: 'static' } // Simplifies to true
+      ]
+    }
+  },
+  SAAS_TENANT: {
+    name: 'Tenant Isolation',
+    desc: 'Check organization_id via metadata.',
+    tree: {
+      id: 'root', type: 'group', operator: 'AND', children: [
+        { id: 'p1', type: 'condition', field: 'org_id', comparator: '=', value: "(auth.jwt() ->> 'org_id')::uuid", valueType: 'dynamic' }
+      ]
+    }
   }
-  // Fallback para ambientes não seguros (HTTP)
-  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
-    const r = (Math.random() * 16) | 0;
-    const v = c === 'x' ? r : (r & 0x3) | 0x8;
-    return v.toString(16);
-  });
 };
 
 const RLSDesigner: React.FC<RLSDesignerProps> = ({ projectId, entityType, entityName, onBack }) => {
-  const [columns, setColumns] = useState<string[]>([]);
+  // --- STATE ---
+  const [columns, setColumns] = useState<{name: string, type: string}[]>([]);
+  const [foreignKeys, setForeignKeys] = useState<ForeignKey[]>([]);
+  
   const [policyName, setPolicyName] = useState('');
   const [command, setCommand] = useState('SELECT');
   const [role, setRole] = useState('authenticated');
+  
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
-  const [availableBlocks, setAvailableBlocks] = useState<Block[]>([]);
+  const [deployError, setDeployError] = useState<string | null>(null);
   
-  // The core logic tree
+  // The Brain
   const [logicTree, setLogicTree] = useState<LogicNode>({
     id: 'root',
     type: 'group',
@@ -66,408 +102,570 @@ const RLSDesigner: React.FC<RLSDesignerProps> = ({ projectId, entityType, entity
     children: []
   });
 
-  const fetchMetadata = async () => {
+  const [activeTab, setActiveTab] = useState<'visual' | 'sql' | 'simulator'>('visual');
+  const [simulatorUid, setSimulatorUid] = useState('');
+
+  // --- INITIALIZATION ---
+
+  const fetchSchemaInfo = async () => {
     setLoading(true);
     const token = localStorage.getItem('cascata_token');
+    
     try {
       if (entityType === 'table') {
-        const res = await fetch(`/api/data/${projectId}/tables/${entityName}/columns`, {
+        // 1. Get Columns
+        const colRes = await fetch(`/api/data/${projectId}/tables/${entityName}/columns`, {
           headers: { 'Authorization': `Bearer ${token}` }
         });
-        const data = await res.json();
-        setColumns(data.map((c: any) => c.name));
+        const colData = await colRes.json();
+        setColumns(colData.map((c: any) => ({ name: c.name, type: c.type })));
+
+        // 2. Get Foreign Keys via SQL (Power Move)
+        const fkQuery = `
+          SELECT
+              kcu.column_name, 
+              ccu.table_name AS foreign_table_name,
+              ccu.column_name AS foreign_column_name 
+          FROM information_schema.key_column_usage AS kcu
+          JOIN information_schema.constraint_column_usage AS ccu
+              ON ccu.constraint_name = kcu.constraint_name
+          JOIN information_schema.table_constraints AS tc
+              ON tc.constraint_name = kcu.constraint_name
+          WHERE tc.constraint_type = 'FOREIGN KEY' AND tc.table_name = '${entityName}';
+        `;
+        
+        const fkRes = await fetch(`/api/data/${projectId}/query`, {
+           method: 'POST',
+           headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+           body: JSON.stringify({ sql: fkQuery })
+        });
+        const fkData = await fkRes.json();
+        
+        if (fkData.rows) {
+            setForeignKeys(fkData.rows.map((r: any) => ({
+                column: r.column_name,
+                foreignTable: r.foreign_table_name,
+                foreignColumn: r.foreign_column_name
+            })));
+        }
+
       } else {
-        // Storage Standard Attributes
-        setColumns(['name', 'owner_id', 'created_at', 'updated_at', 'size', 'mime_type']);
+        // Bucket Schema
+        setColumns([
+            { name: 'name', type: 'text' },
+            { name: 'owner_id', type: 'uuid' }, // Maps to auth.users usually
+            { name: 'created_at', type: 'timestamptz' },
+            { name: 'size', type: 'int8' },
+            { name: 'mime_type', type: 'text' }
+        ]);
+        // Allow linking owner_id to auth users hypothetically
+        setForeignKeys([{ column: 'owner_id', foreignTable: 'auth.users', foreignColumn: 'id' }]);
       }
     } catch (e) {
-      console.error("Failed to load metadata");
+      console.error("Schema fetch failed", e);
     } finally {
       setLoading(false);
     }
   };
 
-  useEffect(() => {
-    fetchMetadata();
-  }, [projectId, entityName]);
+  useEffect(() => { fetchSchemaInfo(); }, [projectId, entityName]);
 
-  // Initial Blocks Setup
-  useEffect(() => {
-    const blocks: Block[] = [
-      // AUTH BLOCKS
-      { id: 'auth_uid', type: 'auth', category: 'auth', label: 'Current User ID', value: 'auth.uid()' },
-      { id: 'auth_role', type: 'auth', category: 'auth', label: 'User Role', value: 'auth.role()' },
-      { id: 'auth_email', type: 'auth', category: 'auth', label: 'User Email', value: 'auth.jwt() ->> \'email\'' },
-      { id: 'auth_is_anon', type: 'auth', category: 'auth', label: 'Is Anonymous', value: 'auth.role() = \'anon\'' },
-      
-      // LOGIC BLOCKS
-      { id: 'logic_and', type: 'logic', category: 'logic', label: 'AND Group', value: 'AND', isContainer: true },
-      { id: 'logic_or', type: 'logic', category: 'logic', label: 'OR Group', value: 'OR', isContainer: true },
-      
-      // STATIC VALUES
-      { id: 'val_true', type: 'value', category: 'static', label: 'TRUE (Allow)', value: 'true' },
-      { id: 'val_false', type: 'value', category: 'static', label: 'FALSE (Deny)', value: 'false' },
-    ];
-    setAvailableBlocks(blocks);
-  }, []);
+  // --- LOGIC MANIPULATION ---
 
-  const addNode = (parentId: string, nodeType: 'condition' | 'group') => {
-    const newNode: LogicNode = nodeType === 'group' 
-      ? { id: getUUID(), type: 'group', operator: 'AND', children: [] }
-      : { id: getUUID(), type: 'condition', field: columns[0] || 'id', comparator: '=', value: 'auth.uid()' };
-
-    const updateTree = (node: LogicNode): LogicNode => {
-      if (node.id === parentId && node.children) {
-        return { ...node, children: [...node.children, newNode] };
-      }
-      if (node.children) {
-        return { ...node, children: node.children.map(updateTree) };
-      }
-      return node;
-    };
-
-    setLogicTree(updateTree(logicTree));
-  };
-
-  const removeNode = (nodeId: string) => {
-    const updateTree = (node: LogicNode): LogicNode => {
-      if (node.children) {
-        return { ...node, children: node.children.filter(child => child.id !== nodeId).map(updateTree) };
-      }
-      return node;
-    };
-    setLogicTree(updateTree(logicTree));
-  };
-
-  const updateNode = (nodeId: string, updates: Partial<LogicNode>) => {
-    const updateTree = (node: LogicNode): LogicNode => {
-      if (node.id === nodeId) {
-        return { ...node, ...updates };
-      }
-      if (node.children) {
-        return { ...node, children: node.children.map(updateTree) };
-      }
-      return node;
-    };
-    setLogicTree(updateTree(logicTree));
-  };
-
-  // Compile Tree to SQL
-  const compileSQL = (node: LogicNode, depth = 0): string => {
-    if (node.type === 'group') {
-      if (!node.children || node.children.length === 0) return 'true'; // Empty group default
-      const childrenSQL = node.children.map(child => compileSQL(child, depth + 1));
-      const joined = childrenSQL.join(` ${node.operator} `);
-      return depth === 0 ? joined : `(${joined})`;
-    } else {
-      // Condition
-      let val = node.value || '';
-      // Simple heuristic: if value looks like a string literal but isn't a function call (contains '('), quote it.
-      // This is a basic implementation. Ideally, we'd have a 'type' for the value.
-      // For now, users type raw SQL values or select Auth functions.
-      return `${node.field} ${node.comparator} ${val}`;
-    }
-  };
-
-  const generatedSQL = compileSQL(logicTree);
-
-  const handleSave = async () => {
-    if (!policyName) { alert("Please name your policy."); return; }
-    setSaving(true);
-    try {
-      const token = localStorage.getItem('cascata_token');
-      const payload = {
-        name: policyName,
-        table: entityName,
-        command: command,
-        role: role,
-        using: generatedSQL,
-        withCheck: ['INSERT', 'UPDATE', 'ALL'].includes(command) ? generatedSQL : ''
+  const updateNode = (id: string, changes: Partial<LogicNode>) => {
+      const traverse = (node: LogicNode): LogicNode => {
+          if (node.id === id) return { ...node, ...changes };
+          if (node.children) return { ...node, children: node.children.map(traverse) };
+          return node;
       };
+      setLogicTree(traverse(logicTree));
+  };
 
-      const res = await fetch(`/api/data/${projectId}/policies`, {
-        method: 'POST',
-        headers: { 
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${token}` 
-        },
-        body: JSON.stringify(payload)
-      });
+  const addNode = (parentId: string, type: 'condition' | 'group' | 'relation') => {
+      const newNode: LogicNode = { 
+          id: getUUID(), 
+          type, 
+          // Defaults
+          operator: 'AND', 
+          children: [], 
+          field: columns[0]?.name || 'id', 
+          comparator: '=', 
+          value: '',
+          valueType: 'static'
+      };
+      
+      const traverse = (node: LogicNode): LogicNode => {
+          if (node.id === parentId && node.children) return { ...node, children: [...node.children, newNode] };
+          if (node.children) return { ...node, children: node.children.map(traverse) };
+          return node;
+      };
+      setLogicTree(traverse(logicTree));
+  };
 
-      if (!res.ok) throw new Error("Failed to save policy");
-      onBack(); // Return to manager
-    } catch (e) {
-      alert("Error saving policy");
-    } finally {
-      setSaving(false);
-    }
+  const removeNode = (id: string) => {
+      const traverse = (node: LogicNode): LogicNode => {
+          if (!node.children) return node;
+          return { ...node, children: node.children.filter(c => c.id !== id).map(traverse) };
+      };
+      setLogicTree(traverse(logicTree));
+  };
+
+  const loadPreset = (presetKey: string) => {
+      // Deep copy the preset tree to avoid reference issues
+      const preset = (PRESETS as any)[presetKey];
+      if (preset) {
+          setLogicTree(JSON.parse(JSON.stringify(preset.tree)));
+          if (!policyName) setPolicyName(preset.name);
+      }
+  };
+
+  // --- COMPILER ENGINE ---
+
+  const compileNode = (node: LogicNode, depth: number = 0): string => {
+      if (node.type === 'group') {
+          if (!node.children || node.children.length === 0) return '';
+          const parts = node.children.map(c => compileNode(c, depth + 1)).filter(Boolean);
+          if (parts.length === 0) return '';
+          const joined = parts.join(` ${node.operator} `);
+          return depth === 0 ? joined : `(${joined})`;
+      } 
+      
+      if (node.type === 'relation') {
+          // Generates: EXISTS (SELECT 1 FROM target WHERE target.key = current.key AND (children_logic))
+          if (!node.relationTable || !node.children || node.children.length === 0) return '';
+          
+          const innerLogic = compileNode({ 
+              id: 'temp', type: 'group', operator: 'AND', children: node.children 
+          }, depth + 1);
+          
+          if (!innerLogic) return '';
+
+          // NOTE: In RLS, we refer to the current table implicitly or via table name.
+          // For safety in subqueries, we should alias the subquery table or use fully qualified names.
+          // Simplified implementation:
+          return `EXISTS (SELECT 1 FROM public."${node.relationTable}" WHERE public."${node.relationTable}"."${node.relationForeignKey}" = "${entityName}"."${node.relationLocalKey}" AND ${innerLogic})`;
+      }
+
+      if (node.type === 'condition') {
+          if (node.field === 'true') return 'true';
+          if (!node.field) return '';
+          
+          let val = node.value;
+          if (node.valueType === 'static') {
+              // Quote strings, leave numbers/booleans
+              const isNum = !isNaN(Number(val));
+              const isBool = val === 'true' || val === 'false';
+              if (!isNum && !isBool && val !== 'null') val = `'${val}'`;
+          }
+          
+          return `"${node.field}" ${node.comparator} ${val}`;
+      }
+
+      return '';
+  };
+
+  const generatedSQL = compileSQL();
+
+  function compileSQL() {
+      const sql = compileNode(logicTree);
+      return sql || 'false'; // Default deny if empty
+  }
+
+  // --- ACTIONS ---
+
+  const handleDeploy = async () => {
+      if (!policyName) { alert("Enter a policy name."); return; }
+      setSaving(true);
+      setDeployError(null);
+      
+      try {
+          const sql = generatedSQL;
+          const fullCmd = `
+            ${command === 'INSERT' || command === 'ALL' ? `-- WITH CHECK clause applied automatically for INSERT` : ''}
+            CREATE POLICY "${policyName}"
+            ON "${entityName}"
+            FOR ${command}
+            TO ${role}
+            USING (${sql})
+            ${['INSERT', 'UPDATE', 'ALL'].includes(command) ? `WITH CHECK (${sql})` : ''};
+          `;
+          
+          // Execute via Query Endpoint directly for maximum control
+          const res = await fetch(`/api/data/${projectId}/query`, {
+              method: 'POST',
+              headers: { 
+                  'Content-Type': 'application/json',
+                  'Authorization': `Bearer ${localStorage.getItem('cascata_token')}` 
+              },
+              body: JSON.stringify({ sql: fullCmd })
+          });
+
+          const data = await res.json();
+
+          if (!res.ok) {
+              // Extract Postgres error code and message
+              const errorMsg = data.error || "Unknown database error";
+              const errorCode = data.code ? `(Code: ${data.code})` : "";
+              
+              if (data.code === '42883') {
+                  throw new Error(`Database Error ${errorCode}: The function used (like auth.uid()) does not exist. Please run migration 013.`);
+              }
+              
+              throw new Error(`Database Error ${errorCode}: ${errorMsg}`);
+          }
+          
+          // Success!
+          onBack();
+      } catch (e: any) {
+          setDeployError(e.message);
+          console.error(e);
+      } finally {
+          setSaving(false);
+      }
   };
 
   // --- RENDERERS ---
 
-  const renderNode = (node: LogicNode) => {
-    if (node.type === 'group') {
+  const renderNode = (node: LogicNode, depth: number = 0) => {
+      const isRoot = node.id === 'root';
+      const isGroup = node.type === 'group';
+      const isRelation = node.type === 'relation';
+
       return (
-        <div key={node.id} className="border-l-4 border-slate-300 pl-4 py-2 my-2 relative group transition-all">
-          <div className="flex items-center gap-3 mb-2">
-            <div className="bg-amber-100 text-amber-700 px-3 py-1 rounded-lg font-black text-xs uppercase tracking-widest border border-amber-200 flex items-center gap-2 shadow-sm">
-              <GitBranch size={14} />
-              <select 
-                value={node.operator} 
-                onChange={(e) => updateNode(node.id, { operator: e.target.value as 'AND' | 'OR' })}
-                className="bg-transparent outline-none cursor-pointer"
-              >
-                <option value="AND">ALL OF (AND)</option>
-                <option value="OR">ANY OF (OR)</option>
-              </select>
-            </div>
-            <div className="h-[1px] bg-slate-200 flex-1"></div>
-            {node.id !== 'root' && (
-              <button onClick={() => removeNode(node.id)} className="text-slate-300 hover:text-rose-500 transition-colors p-1"><Trash2 size={14} /></button>
-            )}
-          </div>
-          
-          <div className="space-y-2">
-            {node.children?.map(renderNode)}
-          </div>
+          <div key={node.id} className={`relative flex flex-col ${!isRoot ? 'ml-6 mt-3' : ''}`}>
+              {/* Connector Lines */}
+              {!isRoot && (
+                  <div className="absolute -left-6 top-4 w-6 h-[2px] bg-slate-300 rounded-l-full"></div>
+              )}
+              {!isRoot && (
+                  <div className="absolute -left-6 -top-4 h-[calc(100%+1rem)] w-[2px] bg-slate-300"></div>
+              )}
 
-          <div className="mt-3 flex gap-2 opacity-50 hover:opacity-100 transition-opacity">
-            <button onClick={() => addNode(node.id, 'condition')} className="text-[10px] font-bold bg-slate-100 hover:bg-indigo-50 hover:text-indigo-600 text-slate-500 px-3 py-1.5 rounded-lg flex items-center gap-1 transition-all">
-              <Plus size={12} /> Add Rule
-            </button>
-            <button onClick={() => addNode(node.id, 'group')} className="text-[10px] font-bold bg-slate-100 hover:bg-amber-50 hover:text-amber-600 text-slate-500 px-3 py-1.5 rounded-lg flex items-center gap-1 transition-all">
-              <Box size={12} /> Add Group
-            </button>
+              {/* Node Content */}
+              <div className={`
+                  flex items-center gap-2 p-3 rounded-2xl border transition-all shadow-sm
+                  ${isGroup ? 'bg-slate-50 border-slate-200' : isRelation ? 'bg-indigo-50 border-indigo-200' : 'bg-white border-slate-200 hover:border-indigo-300'}
+              `}>
+                  {/* Handle */}
+                  {!isRoot && <GripVertical size={14} className="text-slate-300 cursor-grab" />}
+
+                  {/* Logic Control (Group) */}
+                  {isGroup && (
+                      <div className="flex items-center gap-3">
+                          <div className={`px-3 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-widest flex items-center gap-2 cursor-pointer transition-colors ${node.operator === 'AND' ? 'bg-amber-100 text-amber-700' : 'bg-purple-100 text-purple-700'}`}>
+                              <GitBranch size={12}/>
+                              <select 
+                                value={node.operator} 
+                                onChange={(e) => updateNode(node.id, { operator: e.target.value as any })}
+                                className="bg-transparent outline-none appearance-none cursor-pointer"
+                              >
+                                  <option value="AND">ALL OF (AND)</option>
+                                  <option value="OR">ANY OF (OR)</option>
+                              </select>
+                          </div>
+                          
+                          <div className="h-4 w-[1px] bg-slate-300 mx-1"></div>
+                          
+                          <div className="flex gap-1">
+                              <button onClick={() => addNode(node.id, 'condition')} className="p-1.5 hover:bg-white rounded-md text-slate-400 hover:text-emerald-600 transition-all" title="Add Rule"><Plus size={14}/></button>
+                              <button onClick={() => addNode(node.id, 'group')} className="p-1.5 hover:bg-white rounded-md text-slate-400 hover:text-amber-600 transition-all" title="Add Group"><Layers size={14}/></button>
+                              <button onClick={() => addNode(node.id, 'relation')} className="p-1.5 hover:bg-white rounded-md text-slate-400 hover:text-indigo-600 transition-all" title="Add Relation Check"><LinkIcon size={14}/></button>
+                          </div>
+                      </div>
+                  )}
+
+                  {/* Relation Logic (Concatenation) */}
+                  {isRelation && (
+                      <div className="flex items-center gap-2 text-xs">
+                          <span className="font-bold text-indigo-700 uppercase text-[10px]">LINK:</span>
+                          <span className="font-mono text-slate-600 bg-white px-2 py-1 rounded border border-indigo-100">{entityName}.</span>
+                          <select 
+                            value={node.relationLocalKey}
+                            onChange={(e) => {
+                                const fk = foreignKeys.find(f => f.column === e.target.value);
+                                updateNode(node.id, { 
+                                    relationLocalKey: e.target.value,
+                                    relationTable: fk?.foreignTable,
+                                    relationForeignKey: fk?.foreignColumn
+                                });
+                            }}
+                            className="bg-white border border-indigo-100 rounded-lg px-2 py-1 font-bold text-indigo-700 outline-none"
+                          >
+                              <option value="">Choose FK...</option>
+                              {foreignKeys.map(fk => <option key={fk.column} value={fk.column}>{fk.column} → {fk.foreignTable}</option>)}
+                          </select>
+                          <ArrowRight size={12} className="text-indigo-300"/>
+                          <span className="font-bold text-slate-700">{node.relationTable || 'Target'}</span>
+                          <span className="text-indigo-400 text-[10px] font-medium ml-2">(Where conditions match...)</span>
+                          
+                          <div className="flex gap-1 ml-4">
+                              <button onClick={() => addNode(node.id, 'condition')} className="p-1.5 bg-white hover:bg-indigo-100 rounded-md text-indigo-400 hover:text-indigo-600 transition-all" title="Add Sub-Condition"><Plus size={14}/></button>
+                          </div>
+                      </div>
+                  )}
+
+                  {/* Condition Logic */}
+                  {!isGroup && !isRelation && (
+                      <div className="flex items-center gap-2 w-full">
+                          {/* Field Selector */}
+                          <div className="relative">
+                              <select 
+                                value={node.field} 
+                                onChange={(e) => updateNode(node.id, { field: e.target.value })}
+                                className="appearance-none bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 text-emerald-800 font-mono text-xs font-bold py-2 pl-3 pr-8 rounded-lg outline-none cursor-pointer transition-colors"
+                              >
+                                  {columns.map(c => <option key={c.name} value={c.name}>{c.name}</option>)}
+                                  <option value="true">ALWAYS TRUE</option>
+                              </select>
+                              <ChevronDown size={12} className="absolute right-2 top-1/2 -translate-y-1/2 text-emerald-500 pointer-events-none" />
+                          </div>
+
+                          {/* Comparator */}
+                          <select 
+                            value={node.comparator} 
+                            onChange={(e) => updateNode(node.id, { comparator: e.target.value as any })}
+                            className="bg-slate-100 font-mono text-slate-600 text-xs font-black py-2 px-2 rounded-lg outline-none text-center cursor-pointer hover:bg-slate-200"
+                          >
+                              {['=', '!=', '>', '<', 'IN', 'IS'].map(op => <option key={op} value={op}>{op}</option>)}
+                          </select>
+
+                          {/* Value Input (Smart) */}
+                          <div className="flex-1 relative group/val">
+                              <div className="absolute left-2 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none">
+                                  {node.valueType === 'auth' ? <User size={12}/> : node.valueType === 'dynamic' ? <Zap size={12}/> : null}
+                              </div>
+                              <input 
+                                value={node.value}
+                                onChange={(e) => updateNode(node.id, { value: e.target.value })}
+                                placeholder={node.valueType === 'auth' ? 'auth.uid()' : 'Value...'}
+                                className={`w-full border rounded-lg py-2 pr-8 text-xs font-mono font-medium outline-none transition-all ${node.valueType === 'auth' ? 'bg-purple-50 border-purple-200 text-purple-700 pl-8' : 'bg-white border-slate-200 text-slate-700 pl-3'}`}
+                              />
+                              
+                              {/* Quick Value Type Switcher */}
+                              <div className="absolute right-1 top-1/2 -translate-y-1/2 flex gap-1 opacity-0 group-hover/val:opacity-100 transition-opacity bg-white shadow-sm rounded-md border border-slate-100">
+                                  <button onClick={() => updateNode(node.id, { value: 'auth.uid()', valueType: 'auth' })} title="Auth UID" className="p-1 hover:bg-purple-50 text-slate-400 hover:text-purple-600 rounded"><User size={12}/></button>
+                                  <button onClick={() => updateNode(node.id, { value: 'true', valueType: 'static' })} title="Static" className="p-1 hover:bg-slate-50 text-slate-400 hover:text-slate-600 rounded"><CheckSquare size={12}/></button>
+                              </div>
+                          </div>
+                      </div>
+                  )}
+
+                  {/* Delete Node */}
+                  {!isRoot && (
+                      <button onClick={() => removeNode(node.id)} className="ml-auto p-2 text-slate-300 hover:text-rose-500 hover:bg-rose-50 rounded-lg transition-all"><X size={14} /></button>
+                  )}
+              </div>
+
+              {/* Recursive Children Render */}
+              {node.children && node.children.length > 0 && (
+                  <div className="pl-6 border-l-2 border-slate-200 ml-6 pb-2">
+                      {node.children.map(child => renderNode(child, depth + 1))}
+                  </div>
+              )}
           </div>
-        </div>
       );
-    } else {
-      // CONDITION NODE
-      return (
-        <div key={node.id} className="flex items-center gap-2 bg-white p-3 rounded-xl border border-slate-200 shadow-sm hover:border-indigo-300 transition-all group relative">
-          <GripVertical size={14} className="text-slate-300 cursor-move" />
-          
-          {/* FIELD */}
-          <div className="relative">
-            <select 
-              value={node.field} 
-              onChange={(e) => updateNode(node.id, { field: e.target.value })}
-              className="appearance-none bg-emerald-50 border border-emerald-100 text-emerald-700 font-mono text-xs font-bold py-2 pl-3 pr-8 rounded-lg outline-none focus:ring-2 focus:ring-emerald-500/20 cursor-pointer"
-            >
-              {columns.map(c => <option key={c} value={c}>{c}</option>)}
-            </select>
-            <ChevronDown size={12} className="absolute right-2 top-1/2 -translate-y-1/2 text-emerald-400 pointer-events-none" />
-          </div>
-
-          {/* COMPARATOR */}
-          <select 
-            value={node.comparator} 
-            onChange={(e) => updateNode(node.id, { comparator: e.target.value })}
-            className="bg-slate-100 text-slate-600 text-xs font-black py-2 px-2 rounded-lg outline-none text-center cursor-pointer hover:bg-slate-200"
-          >
-            <option value="=">=</option>
-            <option value="!=">!=</option>
-            <option value=">">&gt;</option>
-            <option value="<">&lt;</option>
-            <option value="IN">IN</option>
-            <option value="IS">IS</option>
-          </select>
-
-          {/* VALUE (Droppable Target Logic Simulated) */}
-          <div className="flex-1 relative">
-             <input 
-               value={node.value}
-               onChange={(e) => updateNode(node.id, { value: e.target.value })}
-               placeholder="value or auth.uid()"
-               className="w-full bg-slate-50 border border-slate-200 text-slate-800 font-mono text-xs py-2 px-3 rounded-lg outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-500/10 transition-all"
-             />
-             {/* Quick Actions for Value */}
-             <div className="absolute right-1 top-1/2 -translate-y-1/2 flex gap-1">
-                <button onClick={() => updateNode(node.id, { value: 'auth.uid()' })} title="Set to Current User ID" className="p-1 text-indigo-300 hover:text-indigo-600 transition-colors"><User size={12}/></button>
-                <button onClick={() => updateNode(node.id, { value: 'true' })} title="Set to True" className="p-1 text-emerald-300 hover:text-emerald-600 transition-colors"><CheckCircle2 size={12}/></button>
-             </div>
-          </div>
-
-          <button onClick={() => removeNode(node.id)} className="p-2 text-slate-300 hover:text-rose-500 transition-colors opacity-0 group-hover:opacity-100"><X size={14} /></button>
-        </div>
-      );
-    }
   };
 
   return (
-    <div className="h-screen flex flex-col bg-[#F0F4F8] relative z-50">
+    <div className="h-screen flex flex-col bg-[#F8FAFC]">
       {/* Header */}
-      <header className="h-20 bg-white border-b border-slate-200 flex items-center justify-between px-8 shrink-0">
+      <header className="h-20 bg-white border-b border-slate-200 flex items-center justify-between px-8 shrink-0 z-20 shadow-sm">
         <div className="flex items-center gap-6">
-          <button onClick={onBack} className="p-2 hover:bg-slate-100 rounded-full transition-colors text-slate-400 hover:text-slate-900">
-            <ArrowLeft size={24} />
+          <button onClick={onBack} className="p-2.5 bg-slate-50 hover:bg-slate-100 rounded-xl transition-colors text-slate-500 hover:text-slate-900 border border-slate-200">
+            <ArrowLeft size={20} />
           </button>
           <div>
-            <h1 className="text-2xl font-black text-slate-900 tracking-tight flex items-center gap-3">
-              RLS Architect <span className="bg-indigo-100 text-indigo-700 px-2 py-0.5 rounded text-[10px] uppercase tracking-widest font-bold border border-indigo-200">Visual Mode</span>
+            <h1 className="text-xl font-black text-slate-900 tracking-tight flex items-center gap-3">
+              <ShieldCheck size={24} className="text-indigo-600" />
+              RLS Architect <span className="bg-indigo-50 text-indigo-600 px-2 py-0.5 rounded text-[10px] uppercase tracking-widest font-black border border-indigo-100">Pro</span>
             </h1>
-            <p className="text-[10px] text-slate-400 font-bold uppercase tracking-widest mt-1">
-              Securing {entityType}: <span className="text-indigo-600 font-mono">{entityName}</span>
+            <p className="text-[10px] text-slate-400 font-bold uppercase tracking-widest mt-1 flex items-center gap-2">
+              Target: <span className="bg-slate-100 px-2 rounded text-slate-600">{entityType}</span> <ChevronDown size={10}/> <span className="text-indigo-600 font-mono">{entityName}</span>
             </p>
           </div>
         </div>
 
-        <div className="flex items-center gap-4">
-          {/* Policy Config Inputs */}
-          <div className="flex items-center gap-2 bg-slate-50 p-1.5 rounded-xl border border-slate-200 mr-4">
-             <input 
-               value={policyName}
-               onChange={(e) => setPolicyName(e.target.value)}
-               placeholder="Policy Name (e.g. User Own Data)"
-               className="bg-transparent text-xs font-bold px-3 py-2 outline-none w-48 text-slate-700 placeholder:text-slate-400"
-             />
-             <div className="w-[1px] h-6 bg-slate-200"></div>
-             <select 
-               value={command}
-               onChange={(e) => setCommand(e.target.value)}
-               className="bg-transparent text-[10px] font-black uppercase text-indigo-600 outline-none px-2 cursor-pointer"
-             >
-               <option value="SELECT">Select (Read)</option>
-               <option value="INSERT">Insert (Create)</option>
-               <option value="UPDATE">Update (Edit)</option>
-               <option value="DELETE">Delete (Remove)</option>
-               <option value="ALL">ALL Actions</option>
-             </select>
-             <div className="w-[1px] h-6 bg-slate-200"></div>
-             <select 
-               value={role}
-               onChange={(e) => setRole(e.target.value)}
-               className="bg-transparent text-[10px] font-black uppercase text-emerald-600 outline-none px-2 cursor-pointer"
-             >
-               <option value="authenticated">Authenticated</option>
-               <option value="anon">Anonymous</option>
-               <option value="public">Public (All)</option>
-             </select>
+        <div className="flex items-center gap-3">
+          <div className="flex bg-slate-100 p-1 rounded-xl">
+              <button onClick={() => setActiveTab('visual')} className={`px-4 py-2 rounded-lg text-[10px] font-black uppercase tracking-widest transition-all ${activeTab === 'visual' ? 'bg-white shadow text-indigo-600' : 'text-slate-400'}`}>Visual Builder</button>
+              <button onClick={() => setActiveTab('sql')} className={`px-4 py-2 rounded-lg text-[10px] font-black uppercase tracking-widest transition-all ${activeTab === 'sql' ? 'bg-white shadow text-indigo-600' : 'text-slate-400'}`}>Raw SQL</button>
           </div>
-
           <button 
-            onClick={handleSave} 
+            onClick={handleDeploy} 
             disabled={saving || !policyName}
             className="bg-slate-900 text-white px-6 py-3 rounded-xl font-black text-xs uppercase tracking-widest hover:bg-indigo-600 transition-all flex items-center gap-2 shadow-xl disabled:opacity-50 disabled:cursor-not-allowed"
           >
-            {saving ? <Loader2 size={16} className="animate-spin" /> : <Save size={16} />} Deploy Rules
+            {saving ? <Loader2 size={16} className="animate-spin" /> : <Save size={16} />} Deploy Policy
           </button>
         </div>
       </header>
 
+      {deployError && (
+          <div className="bg-rose-50 border-b border-rose-100 p-4 flex items-center justify-between animate-in slide-in-from-top-2">
+              <div className="flex items-center gap-3">
+                  <AlertTriangle className="text-rose-600" size={20} />
+                  <div>
+                      <h4 className="text-sm font-black text-rose-900">Deployment Failed</h4>
+                      <p className="text-xs text-rose-700">{deployError}</p>
+                  </div>
+              </div>
+              <button onClick={() => setDeployError(null)} className="text-rose-400 hover:text-rose-700"><X size={18}/></button>
+          </div>
+      )}
+
       <div className="flex-1 flex overflow-hidden">
-        {/* LEFT TOOLBOX */}
-        <aside className="w-72 bg-white border-r border-slate-200 flex flex-col overflow-y-auto">
-          <div className="p-6">
-            <h3 className="text-[10px] font-black text-slate-400 uppercase tracking-[0.2em] mb-4">Building Blocks</h3>
-            
-            <div className="space-y-6">
-              {/* AUTH CATEGORY */}
-              <div>
-                <div className="flex items-center gap-2 text-indigo-600 mb-2 font-bold text-xs"><Lock size={12} /> Authentication</div>
-                <div className="space-y-2">
-                  {availableBlocks.filter(b => b.category === 'auth').map(b => (
-                    <div key={b.id} draggable className="bg-indigo-50 border border-indigo-100 p-3 rounded-lg text-xs font-bold text-indigo-900 cursor-grab active:cursor-grabbing hover:bg-indigo-100 transition-colors shadow-sm select-none">
-                      {b.label}
+        
+        {/* LEFT: PRESETS & CONFIG */}
+        <aside className="w-80 bg-white border-r border-slate-200 flex flex-col overflow-y-auto z-10">
+            <div className="p-6 border-b border-slate-100">
+                <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1 mb-2 block">Policy Configuration</label>
+                <div className="space-y-4">
+                    <input 
+                       value={policyName}
+                       onChange={(e) => setPolicyName(e.target.value)}
+                       placeholder="Policy Name (e.g. Tenant Isolation)"
+                       className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-xs font-bold outline-none focus:border-indigo-400 transition-all"
+                    />
+                    <div className="grid grid-cols-2 gap-3">
+                        <div>
+                            <label className="text-[9px] font-bold text-slate-400 uppercase block mb-1">Command</label>
+                            <select 
+                               value={command}
+                               onChange={(e) => setCommand(e.target.value)}
+                               className="w-full bg-white border border-slate-200 rounded-xl px-3 py-2 text-xs font-bold text-indigo-600 outline-none"
+                            >
+                               <option value="SELECT">SELECT (Read)</option>
+                               <option value="INSERT">INSERT (Create)</option>
+                               <option value="UPDATE">UPDATE (Edit)</option>
+                               <option value="DELETE">DELETE (Drop)</option>
+                               <option value="ALL">ALL Actions</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label className="text-[9px] font-bold text-slate-400 uppercase block mb-1">Target Role</label>
+                            <select 
+                               value={role}
+                               onChange={(e) => setRole(e.target.value)}
+                               className="w-full bg-white border border-slate-200 rounded-xl px-3 py-2 text-xs font-bold text-emerald-600 outline-none"
+                            >
+                               <option value="authenticated">Authenticated</option>
+                               <option value="anon">Anonymous</option>
+                               <option value="public">Public (All)</option>
+                            </select>
+                        </div>
                     </div>
-                  ))}
                 </div>
-              </div>
-
-              {/* DATA CATEGORY */}
-              <div>
-                <div className="flex items-center gap-2 text-emerald-600 mb-2 font-bold text-xs"><Database size={12} /> Entity Fields</div>
-                <div className="space-y-2">
-                  {columns.map(col => (
-                    <div key={col} draggable className="bg-emerald-50 border border-emerald-100 p-3 rounded-lg text-xs font-bold text-emerald-900 cursor-grab active:cursor-grabbing hover:bg-emerald-100 transition-colors shadow-sm select-none flex justify-between items-center">
-                      {col} <span className="text-[9px] opacity-50 bg-emerald-200 px-1 rounded">COL</span>
-                    </div>
-                  ))}
-                </div>
-              </div>
-
-              {/* LOGIC CATEGORY */}
-              <div>
-                <div className="flex items-center gap-2 text-amber-600 mb-2 font-bold text-xs"><GitBranch size={12} /> Logic Flow</div>
-                <div className="space-y-2">
-                  <div className="bg-amber-50 border border-amber-100 p-3 rounded-lg text-xs font-bold text-amber-900 cursor-grab active:cursor-grabbing hover:bg-amber-100 transition-colors shadow-sm select-none">
-                    AND Group (All match)
-                  </div>
-                  <div className="bg-amber-50 border border-amber-100 p-3 rounded-lg text-xs font-bold text-amber-900 cursor-grab active:cursor-grabbing hover:bg-amber-100 transition-colors shadow-sm select-none">
-                    OR Group (Any match)
-                  </div>
-                </div>
-              </div>
             </div>
-          </div>
-          
-          <div className="mt-auto p-6 bg-slate-50 border-t border-slate-100">
-            <p className="text-[10px] text-slate-400 leading-relaxed text-center">
-              Drag & Drop functionality is simplified in this version. Use the "+" buttons on the canvas to build your logic tree.
-            </p>
-          </div>
+
+            <div className="p-6">
+                <h3 className="text-[10px] font-black text-slate-400 uppercase tracking-[0.2em] mb-4">Quick Start Presets</h3>
+                <div className="space-y-3">
+                    {Object.entries(PRESETS).map(([key, preset]) => (
+                        <button 
+                            key={key}
+                            onClick={() => loadPreset(key)}
+                            className="w-full text-left p-4 rounded-xl border border-slate-100 hover:border-indigo-200 hover:bg-indigo-50/50 transition-all group"
+                        >
+                            <div className="flex items-center gap-2 mb-1">
+                                <Zap size={14} className="text-amber-500 group-hover:text-amber-600"/>
+                                <span className="font-bold text-xs text-slate-700 group-hover:text-indigo-900">{preset.name}</span>
+                            </div>
+                            <p className="text-[10px] text-slate-400 leading-tight">{preset.desc}</p>
+                        </button>
+                    ))}
+                </div>
+            </div>
+            
+            <div className="mt-auto p-6 bg-slate-50 border-t border-slate-100">
+                <div className="flex items-center gap-3 mb-2">
+                    <div className="p-2 bg-white rounded-lg border border-slate-200 shadow-sm"><Key size={14} className="text-purple-500"/></div>
+                    <div>
+                        <span className="text-[10px] font-bold text-slate-500 block">Auth Context</span>
+                        <span className="text-[9px] text-slate-400 block">Available Variables</span>
+                    </div>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                    {['auth.uid()', 'auth.role()', 'auth.email()'].map(v => (
+                        <code key={v} className="text-[9px] bg-purple-100 text-purple-700 px-2 py-1 rounded border border-purple-200 cursor-copy hover:bg-purple-200" title="Click to Copy" onClick={() => navigator.clipboard.writeText(v)}>{v}</code>
+                    ))}
+                </div>
+            </div>
         </aside>
 
-        {/* CENTER CANVAS */}
-        <main className="flex-1 bg-slate-50 p-10 overflow-y-auto relative bg-[radial-gradient(#e2e8f0_1px,transparent_1px)] [background-size:20px_20px]">
-          <div className="max-w-3xl mx-auto">
-            <div className="bg-white rounded-[2rem] shadow-xl border border-slate-200 overflow-hidden min-h-[600px] flex flex-col">
-              {/* Root Block */}
-              <div className="bg-slate-900 text-white p-6 rounded-t-[2rem] flex items-center gap-4">
-                <ShieldCheck size={24} className="text-emerald-400" />
-                <div>
-                  <h2 className="text-lg font-black tracking-tight">Access Rule Definition</h2>
-                  <p className="text-[10px] text-slate-400 uppercase tracking-widest font-bold">Root Logic Container</p>
+        {/* CENTER: CANVAS */}
+        <main className="flex-1 bg-slate-50/50 relative overflow-hidden flex flex-col">
+            <div className="flex-1 overflow-y-auto p-12">
+                <div className="max-w-4xl mx-auto">
+                    {activeTab === 'visual' ? (
+                        renderNode(logicTree)
+                    ) : (
+                        <div className="bg-slate-900 rounded-3xl p-8 shadow-2xl font-mono text-xs leading-relaxed text-emerald-400 border border-slate-800">
+                            {generatedSQL}
+                        </div>
+                    )}
                 </div>
-              </div>
-
-              <div className="p-8 flex-1">
-                {/* Visual Connector Line */}
-                <div className="relative pl-6 border-l-2 border-dashed border-slate-300 ml-4 pb-10">
-                   <div className="absolute -left-[9px] top-0 w-4 h-4 bg-slate-300 rounded-full border-4 border-white"></div>
-                   
-                   {/* The Tree */}
-                   <div className="space-y-4">
-                      {renderNode(logicTree)}
-                   </div>
-                </div>
-              </div>
             </div>
-          </div>
+            
+            {/* Live Preview Bar */}
+            <div className="h-16 bg-white border-t border-slate-200 px-8 flex items-center justify-between shrink-0">
+                <div className="flex items-center gap-4 text-xs font-mono text-slate-500">
+                    <span className="font-bold text-indigo-600 uppercase">SQL Preview:</span>
+                    <span className="truncate max-w-2xl opacity-70">{generatedSQL}</span>
+                </div>
+                <button 
+                    onClick={() => navigator.clipboard.writeText(generatedSQL)}
+                    className="p-2 hover:bg-slate-100 rounded-lg text-slate-400 hover:text-indigo-600 transition-all" 
+                    title="Copy SQL"
+                >
+                    <Copy size={16}/>
+                </button>
+            </div>
         </main>
 
-        {/* RIGHT PREVIEW */}
-        <aside className="w-80 bg-white border-l border-slate-200 flex flex-col">
-          <div className="p-6 border-b border-slate-100 bg-slate-50/50">
-            <h3 className="text-[10px] font-black text-slate-400 uppercase tracking-[0.2em] flex items-center gap-2"><Eye size={12}/> Live Compilation</h3>
-          </div>
-          <div className="flex-1 p-6 overflow-y-auto">
-            <div className="space-y-6">
-              <div>
-                <label className="text-[10px] font-bold text-indigo-600 mb-2 block">GENERATED SQL (USING)</label>
-                <pre className="bg-slate-900 text-emerald-400 p-4 rounded-xl font-mono text-[10px] leading-relaxed whitespace-pre-wrap border border-slate-800 shadow-inner">
-                  {generatedSQL}
-                </pre>
-              </div>
-              
-              {['INSERT', 'UPDATE', 'ALL'].includes(command) && (
-                <div>
-                  <label className="text-[10px] font-bold text-amber-600 mb-2 block">MUTATION CHECK (WITH CHECK)</label>
-                  <div className="p-3 bg-amber-50 border border-amber-100 rounded-xl text-[10px] text-amber-800 font-medium">
-                    Same logic applied to write operations.
-                  </div>
-                </div>
-              )}
-
-              <div className="p-4 bg-slate-50 rounded-xl border border-slate-100 mt-8">
-                <h4 className="font-bold text-xs text-slate-700 mb-2 flex items-center gap-2"><Zap size={12}/> Logic Summary</h4>
-                <p className="text-[10px] text-slate-500 leading-relaxed">
-                  Users with role <b>{role}</b> performing <b>{command}</b> on <b>{entityName}</b> must satisfy the conditions defined in the logic tree.
-                </p>
-              </div>
+        {/* RIGHT: SIMULATOR (The "Surprise") */}
+        <aside className="w-80 bg-white border-l border-slate-200 flex flex-col z-10">
+            <div className="p-6 border-b border-slate-100 bg-slate-50/50">
+                <h3 className="text-[10px] font-black text-slate-400 uppercase tracking-[0.2em] flex items-center gap-2"><Eye size={14} className="text-indigo-500"/> Logic Simulator</h3>
             </div>
-          </div>
+            <div className="p-6 flex-1 flex flex-col">
+                <p className="text-[10px] text-slate-500 mb-4 leading-relaxed">
+                    Test your logic by simulating a user ID. The system validates if the SQL syntax is valid for this context.
+                </p>
+                
+                <div className="space-y-4">
+                    <div>
+                        <label className="text-[9px] font-bold text-slate-400 uppercase block mb-1">Simulated User ID (auth.uid())</label>
+                        <input 
+                            value={simulatorUid}
+                            onChange={(e) => setSimulatorUid(e.target.value)}
+                            placeholder="e.g. 550e8400-e29b..."
+                            className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-xs font-mono outline-none focus:border-indigo-400"
+                        />
+                    </div>
+                    
+                    <div className="p-4 bg-indigo-50 border border-indigo-100 rounded-xl">
+                        <div className="flex items-center gap-2 mb-2">
+                            <Workflow size={14} className="text-indigo-600"/>
+                            <span className="text-xs font-black text-indigo-900">Dry Run Result</span>
+                        </div>
+                        <div className="text-[10px] font-mono text-indigo-800 break-words bg-white/50 p-2 rounded-lg">
+                            {generatedSQL.replace(/auth\.uid\(\)/g, `'${simulatorUid || '0000-0000'}'`)}
+                        </div>
+                    </div>
+
+                    <div className="mt-auto p-4 bg-amber-50 border border-amber-100 rounded-xl">
+                        <div className="flex items-center gap-2 mb-1 text-amber-700">
+                            <AlertTriangle size={14}/>
+                            <span className="text-[10px] font-black uppercase">Performance Tip</span>
+                        </div>
+                        <p className="text-[9px] text-amber-800 leading-relaxed">
+                            Using <b>EXISTS</b> with linked tables (Relations) is efficient, but ensure foreign key columns are indexed in the database for optimal performance.
+                        </p>
+                    </div>
+                </div>
+            </div>
         </aside>
+
       </div>
     </div>
   );
