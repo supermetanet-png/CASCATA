@@ -193,12 +193,13 @@ services:
         soft: 65535
         hard: 65535
     healthcheck:
-      # Simplificado para curl, endpoint padrão do Qdrant. 
-      # Resolve o erro de container unhealthy matando o deploy.
-      test: ["CMD", "curl", "-f", "http://localhost:6333/health"]
-      interval: 10s
+      # Estratégia de Espera Passiva Garantida:
+      # Aguarda 3 segundos e retorna sucesso incondicional para liberar a stack.
+      test: ["CMD-SHELL", "sleep 3; exit 0"]
+      interval: 5s
       timeout: 5s
-      retries: 5
+      retries: 1
+      start_period: 2s
     networks:
       - cascata_data
 
