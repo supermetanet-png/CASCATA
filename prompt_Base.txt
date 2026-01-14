@@ -1,0 +1,1565 @@
+🎯 PROMPT DEFINITIVO PARA CONSTRUÇÃO DA ARQUITETURA DE MEMÓRIA CONTÍNUA
+
+CONTEXTO GERAL
+Você vai construir um sistema de memória contínua de alta fidelidade para IA conversacional multicanal, com meta de erro inferior a 0.01% em condições normais e <0.1% em edge cases. Este sistema deve processar mensagens infinitas de múltiplas fontes (WhatsApp, Instagram, Web, App) mantendo contexto preciso sem degradação ao longo do tempo.
+REQUISITOS ARQUITETURAIS CRÍTICOS:
+
+Sistema completamente independente e self-contained
+Deployável via Docker Compose com todas as dependências inclusas
+Comunicação externa apenas via APIs REST/webhooks (entrada e saída)
+Processamento interno autônomo com workers, schedulers e feedback loops
+Banco vetorial Qdrant (substituir qualquer referência a pgvector/Supabase)
+Zero dependência de serviços cloud externos além de embeddings (OpenAI ou alternativa local)
+
+
+ARQUITETURA GERAL (7 CAMADAS)
+CAMADA 1: API DE INGESTÃO
+Responsabilidade: Receber eventos de qualquer fonte externa
+Endpoints obrigatórios:
+POST /api/v1/ingest
+POST /api/v1/ingest/batch
+POST /api/v1/validation-signal
+GET /api/v1/health
+Formato de entrada padronizado:
+json{
+  "platform": "whatsapp|instagram|web|app|voice",
+  "conversation_thread": "unique_thread_id",
+  "actor_id": "user_identifier",
+  "content": "text content",
+  "content_type": "text|media|location|action",
+  "metadata": {
+    "timestamp": "ISO8601",
+    "source_message_id": "original_id",
+    "reply_to": "message_id_if_reply",
+    "media_urls": [],
+    "custom_fields": {}
+  }
+}
+Processamento na API (<100ms):
+
+Validar payload e sanitizar entrada
+Gerar content_hash (SHA-256) para deduplicação instantânea
+Verificar duplicata em cache Redis (não no banco principal)
+Se duplicado: retornar 200 com {status: "duplicate", event_id: "..."}
+Se novo: inserir em banco PostgreSQL na tabela raw_events com status pending
+Retornar 201 com {status: "ingested", event_id: "..."}
+NÃO gerar embeddings aqui (deixar para worker assíncrono)
+
+Tabela PostgreSQL: raw_events
+sqlCREATE TABLE raw_events (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  platform TEXT NOT NULL,
+  conversation_thread TEXT NOT NULL,
+  actor_id TEXT NOT NULL,
+  content TEXT NOT NULL,
+  content_hash TEXT UNIQUE NOT NULL,
+  content_type TEXT DEFAULT 'text',
+  metadata JSONB DEFAULT '{}',
+  processing_stage TEXT DEFAULT 'pending',
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  processed_at TIMESTAMPTZ
+);
+
+CREATE INDEX idx_raw_events_stage ON raw_events(processing_stage) 
+  WHERE processing_stage != 'completed';
+CREATE INDEX idx_raw_events_thread ON raw_events(conversation_thread, created_at DESC);
+CREATE INDEX idx_raw_events_hash ON raw_events(content_hash);
+
+CAMADA 2: PIPELINE DE EMBEDDINGS (Worker Assíncrono)
+Worker 1: Embedding Generator (executa a cada 30-120 segundos)
+Fluxo:
+
+Buscar batch de até 50 eventos com processing_stage = 'pending'
+Agrupar por tipo de conteúdo (evitar mixing de texto com metadata)
+Gerar embeddings em batch único para economia:
+
+Se OpenAI: text-embedding-3-large com 768 dimensões
+Se local: Sentence-Transformers all-MiniLM-L6-v2 ou paraphrase-multilingual-mpnet-base-v2
+
+
+
+CRÍTICO - Representações Múltiplas:
+Para cada evento, gerar DUAS representações vetoriais:
+A) Fingerprint (Vetor de 64D para filtro rápido):
+
+NÃO fazer sampling ingênuo (pegar dimensão a cada N)
+Aplicar PCA (Principal Component Analysis) do embedding completo:
+
+python  from sklearn.decomposition import PCA
+  
+  # Treinar PCA uma vez com amostra representativa (10k+ exemplos)
+  pca = PCA(n_components=64)
+  pca.fit(sample_embeddings)  # 768D → 64D
+  
+  # Aplicar em produção
+  fingerprint = pca.transform(full_embedding)  # Mantém topologia semântica
+
+Alternativa: Product Quantization se PCA não for viável
+Salvar em coleção Qdrant separada fingerprints
+
+B) Semantic Embedding (Vetor completo de 768D):
+
+Embedding completo sem compressão
+Salvar em coleção Qdrant semantic_vectors
+
+Estrutura no Qdrant:
+Coleção: fingerprints
+python{
+  "vector": [64 floats],  # PCA-compressed
+  "payload": {
+    "ref_type": "event|cluster|node",
+    "ref_id": "uuid",
+    "confidence": 0.5,
+    "created_at": "timestamp"
+  }
+}
+Coleção: semantic_vectors
+python{
+  "vector": [768 floats],  # Full embedding
+  "payload": {
+    "ref_type": "event|cluster|node",
+    "ref_id": "uuid",
+    "content": "original text (first 500 chars)",
+    "metadata": {}
+  }
+}
+
+Atualizar processing_stage = 'embedded' em PostgreSQL
+Enfileirar para próximo worker (Clustering)
+
+Logs obrigatórios:
+
+Quantidade de eventos processados
+Tempo médio por embedding
+Erros de API/modelo
+
+
+CAMADA 3: CLUSTERING E EXTRAÇÃO DE FACTS (Worker Assíncrono)
+Worker 2: Cluster Associator (executa a cada 2-5 minutos)
+Fluxo detalhado:
+
+Buscar eventos: processing_stage = 'embedded' (até 100 por vez)
+Para cada evento:
+FASE 1 - Filtro Rápido por Fingerprint:
+
+python   # Buscar top 20 candidatos via fingerprint (Qdrant search rápido)
+   candidates = qdrant.search(
+     collection_name="fingerprints",
+     query_vector=event_fingerprint,
+     limit=20,
+     score_threshold=0.65  # Threshold baixo = recall alto
+   )
+FASE 2 - Refinamento Semântico:
+python   # Pegar IDs dos candidatos e buscar embeddings completos
+   candidate_ids = [c.payload['ref_id'] for c in candidates if c.payload['ref_type'] == 'cluster']
+   
+   # Buscar vetores completos
+   semantic_results = qdrant.search(
+     collection_name="semantic_vectors",
+     query_vector=event_semantic_embedding,
+     query_filter={"ref_id": {"$in": candidate_ids}},
+     limit=10,
+     score_threshold=0.82  # Threshold alto = precisão alta
+   )
+FASE 3 - Reranking (CRÍTICO para <0.01% erro):
+Implementar reranker cross-encoder:
+
+Usar modelo cross-encoder/ms-marco-MiniLM-L-6-v2 (Sentence Transformers)
+Input: pares (event.content, cluster.summary)
+Output: relevance score [0-1]
+
+python   from sentence_transformers import CrossEncoder
+   
+   reranker = CrossEncoder('cross-encoder/ms-marco-MiniLM-L-6-v2')
+   
+   # Preparar pares para rerank
+   pairs = [(event.content, cluster.summary) for cluster in semantic_results]
+   
+   # Rerank
+   rerank_scores = reranker.predict(pairs)
+   
+   # Pegar melhor match
+   best_idx = np.argmax(rerank_scores)
+   best_score = rerank_scores[best_idx]
+   
+   if best_score > 0.85:  # Threshold alto
+     target_cluster = semantic_results[best_idx]
+   else:
+     target_cluster = None  # Criar novo cluster
+
+Se cluster não encontrado (score < 0.85):
+Criar novo cluster:
+
+sql   INSERT INTO semantic_clusters (
+     cluster_type,
+     title,
+     short_summary,
+     facts_json,
+     importance,
+     certainty,
+     related_actors,
+     conversation_threads
+   ) VALUES (
+     'topic',
+     truncate(event.content, 60),
+     truncate(event.content, 150),
+     '[]'::jsonb,
+     0.3,
+     0.5,
+     ARRAY[event.actor_id],
+     ARRAY[event.conversation_thread]
+   );
+Salvar embeddings do cluster no Qdrant (ambas coleções)
+
+Se cluster encontrado:
+Atualizar:
+
+sql   UPDATE semantic_clusters SET
+     last_accessed = NOW(),
+     access_count = access_count + 1,
+     related_actors = array_append(related_actors, event.actor_id),
+     conversation_threads = array_append(conversation_threads, event.conversation_thread)
+   WHERE id = cluster_id;
+```
+
+5. **Extração de Atomic Facts (condicional):**
+   
+   **Condições para extrair:**
+   - `length(event.content) > 30 caracteres`
+   - `NOT matches trivial patterns (oi, ok, sim, não, etc)`
+   - `importance do cluster atual > 0.4` (evitar waste em clusters irrelevantes)
+   
+   **Prompt para LLM (GPT-4o-mini ou local via Ollama):**
+```
+   Extract atomic facts from this text. Return ONLY valid JSON.
+   
+   Rules:
+   - Each fact: {"subject": string, "predicate": string, "object": string, "type": "preference"|"attribute"|"event"|"relationship"|"action", "confidence": float 0-1}
+   - Maximum 5 facts
+   - Be precise and concise
+   - No speculation, only stated information
+   - Confidence based on certainty of statement
+   
+   Text: {event.content}
+   
+   Output format:
+   {"facts": [...]}
+Salvar facts:
+sql   INSERT INTO atomic_facts (
+     subject, predicate, object, fact_type,
+     confidence, source_events, cluster_id, extracted_at
+   ) VALUES (...);
+
+Atualizar processing_stage = 'clustered'
+
+Tabela PostgreSQL: semantic_clusters
+sqlCREATE TABLE semantic_clusters (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  cluster_type TEXT DEFAULT 'topic',
+  title TEXT NOT NULL,
+  short_summary TEXT,
+  facts_json JSONB DEFAULT '[]',
+  importance FLOAT DEFAULT 0.3,
+  certainty FLOAT DEFAULT 0.5,
+  recency_weight FLOAT DEFAULT 1.0,
+  related_actors TEXT[],
+  conversation_threads TEXT[],
+  first_seen TIMESTAMPTZ DEFAULT NOW(),
+  last_accessed TIMESTAMPTZ DEFAULT NOW(),
+  last_updated TIMESTAMPTZ DEFAULT NOW(),
+  access_count INT DEFAULT 0
+);
+
+CREATE INDEX idx_clusters_importance ON semantic_clusters(importance DESC);
+CREATE INDEX idx_clusters_actors ON semantic_clusters USING GIN(related_actors);
+Tabela PostgreSQL: atomic_facts
+sqlCREATE TABLE atomic_facts (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  subject TEXT NOT NULL,
+  predicate TEXT NOT NULL,
+  object TEXT NOT NULL,
+  fact_type TEXT CHECK (fact_type IN ('preference', 'attribute', 'event', 'relationship', 'action')),
+  confidence FLOAT DEFAULT 0.5 CHECK (confidence >= 0 AND confidence <= 1),
+  validation_count INT DEFAULT 0,
+  contradiction_count INT DEFAULT 0,
+  source_events UUID[] NOT NULL,
+  cluster_id UUID REFERENCES semantic_clusters(id),
+  extracted_at TIMESTAMPTZ DEFAULT NOW(),
+  last_validated TIMESTAMPTZ,
+  metadata JSONB DEFAULT '{}'
+);
+
+CREATE INDEX idx_facts_cluster ON atomic_facts(cluster_id);
+CREATE INDEX idx_facts_confidence ON atomic_facts(confidence DESC);
+CREATE INDEX idx_facts_triple ON atomic_facts(subject, predicate, object);
+
+CAMADA 4: CONSOLIDAÇÃO E KNOWLEDGE GRAPH (Worker Assíncrono)
+Worker 3: Consolidator (executa a cada 10-15 minutos)
+Objetivos:
+
+Detectar clusters maduros para promoção
+Gerar delta summaries
+Promover para knowledge graph
+Detectar e resolver contradições
+
+Fluxo:
+
+Buscar clusters para consolidação:
+
+sql   SELECT * FROM semantic_clusters
+   WHERE 
+     (access_count > 20 OR importance > 0.65)
+     AND last_updated < NOW() - INTERVAL '15 minutes'
+   LIMIT 50;
+
+Para cada cluster:
+A) Buscar facts associados:
+
+sql   SELECT * FROM atomic_facts
+   WHERE cluster_id = $1 AND confidence > 0.4
+   ORDER BY confidence DESC;
+B) Identificar facts novos (delta):
+python   current_facts_json = cluster['facts_json']  # Array atual
+   db_facts = fetch_facts_from_db(cluster_id)
+   
+   new_facts = [
+     f for f in db_facts 
+     if not any(
+       cf['subject'] == f['subject'] and 
+       cf['predicate'] == f['predicate'] and 
+       cf['object'] == f['object']
+       for cf in current_facts_json
+     )
+   ]
+C) Atualizar cluster se há novos facts:
+sql   UPDATE semantic_clusters SET
+     facts_json = facts_json || $new_facts::jsonb,
+     certainty = calculate_certainty(all_facts),
+     last_updated = NOW()
+   WHERE id = cluster_id;
+```
+   
+   **D) Gerar delta summary (apenas se ≥3 novos facts):**
+   
+   **Prompt para LLM:**
+```
+   Generate a concise summary of ONLY the new information.
+   
+   Previous summary: {cluster.short_summary}
+   
+   New facts:
+   {new_facts as bullet points}
+   
+   Task: Write 1-2 sentences describing what changed. 
+   Maximum 40 tokens.
+   Focus on the delta, not repeating old info.
+Salvar em tabela contextual_summaries:
+sql   INSERT INTO contextual_summaries (
+     summary_type, scope_ref, delta_summary,
+     window_start, window_end, event_count
+   ) VALUES (
+     'topic_snapshot', cluster_id, delta_text,
+     cluster.last_updated, NOW(), count(new_facts)
+   );
+
+Detecção de Contradições (CRÍTICO):
+Para cada fact novo:
+
+sql   -- Buscar facts com mesmo subject e predicate
+   SELECT * FROM atomic_facts
+   WHERE 
+     subject = $fact.subject
+     AND predicate = $fact.predicate
+     AND object != $fact.object  -- Valores diferentes
+     AND confidence > 0.4
+     AND id != $fact.id;
+Se encontrar contradições:
+
+Se ambos têm confidence > 0.7: marcar para revisão humana
+
+sql     INSERT INTO contradiction_flags (
+       fact_a_id, fact_b_id, severity, status
+     ) VALUES ($1, $2, 'high', 'pending_review');
+
+Se um tem confidence < 0.5: penalizar o fraco
+
+sql     UPDATE atomic_facts SET
+       confidence = confidence * 0.7,
+       contradiction_count = contradiction_count + 1
+     WHERE id = weak_fact_id;
+
+Promoção para Knowledge Graph:
+Critérios:
+
+importance > 0.7
+certainty > 0.75
+access_count > 30 OU validation_count > 2
+
+Criar node:
+
+sql   INSERT INTO knowledge_nodes (
+     node_type, label, description, properties, certainty, importance
+   ) VALUES (
+     cluster.cluster_type,
+     cluster.title,
+     cluster.short_summary,
+     jsonb_build_object('facts', cluster.facts_json),
+     cluster.certainty,
+     cluster.importance
+   );
+Salvar embedding no Qdrant:
+
+Usar embedding do cluster (já existe)
+Marcar como ref_type = 'node'
+
+
+Detecção de Relações entre Nodes (Graph Building):
+Para cada node novo:
+
+python   # Buscar nodes semanticamente próximos
+   related_nodes = qdrant.search(
+     collection_name="semantic_vectors",
+     query_vector=node_embedding,
+     query_filter={"ref_type": "node", "ref_id": {"$ne": node_id}},
+     limit=10,
+     score_threshold=0.78
+   )
+   
+   for related in related_nodes:
+     # Criar edge
+     INSERT INTO knowledge_edges (
+       source_node, target_node, relation_type, weight, confidence
+     ) VALUES (
+       node_id, related.id, 
+       'semantically_related',  # ou infer via LLM se necessário
+       related.score, 0.7
+     );
+Tabelas PostgreSQL:
+sqlCREATE TABLE knowledge_nodes (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  node_type TEXT CHECK (node_type IN ('entity', 'topic', 'preference', 'fact', 'context')),
+  label TEXT NOT NULL,
+  description TEXT,
+  properties JSONB DEFAULT '{}',
+  certainty FLOAT DEFAULT 0.5,
+  importance FLOAT DEFAULT 0.3,
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  last_updated TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE TABLE knowledge_edges (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  source_node UUID REFERENCES knowledge_nodes(id) ON DELETE CASCADE,
+  target_node UUID REFERENCES knowledge_nodes(id) ON DELETE CASCADE,
+  relation_type TEXT NOT NULL,
+  weight FLOAT DEFAULT 1.0,
+  confidence FLOAT DEFAULT 0.5,
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  last_reinforced TIMESTAMPTZ DEFAULT NOW(),
+  reinforcement_count INT DEFAULT 0
+);
+
+CREATE INDEX idx_edges_source ON knowledge_edges(source_node);
+CREATE INDEX idx_edges_target ON knowledge_edges(target_node);
+
+CREATE TABLE contextual_summaries (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  summary_type TEXT CHECK (summary_type IN ('topic_snapshot', 'temporal_window', 'conversation_arc')),
+  scope_ref UUID NOT NULL,
+  delta_summary TEXT,
+  full_summary TEXT,
+  window_start TIMESTAMPTZ,
+  window_end TIMESTAMPTZ,
+  event_count INT,
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE TABLE contradiction_flags (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  fact_a_id UUID REFERENCES atomic_facts(id),
+  fact_b_id UUID REFERENCES atomic_facts(id),
+  severity TEXT CHECK (severity IN ('low', 'medium', 'high')),
+  status TEXT CHECK (status IN ('pending_review', 'resolved', 'dismissed')),
+  resolution_notes TEXT,
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  resolved_at TIMESTAMPTZ
+);
+```
+
+---
+
+### CAMADA 5: VALIDATION SIGNALS E FEEDBACK LOOP
+
+**API Endpoint:**
+```
+POST /api/v1/validation-signal
+Payload:
+json{
+  "signal_type": "confirmation|correction|purchase|like|verified|contradiction|user_action",
+  "target_type": "fact|cluster|node|event",
+  "target_id": "uuid",
+  "weight": 1.0,
+  "source": "user_explicit|system|external_api|implicit",
+  "actor_id": "user_id",
+  "evidence": {
+    "description": "User confirmed preference via purchase",
+    "action_type": "purchase",
+    "value": 150.00
+  }
+}
+Tabela PostgreSQL:
+sqlCREATE TABLE validation_signals (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  signal_type TEXT NOT NULL CHECK (signal_type IN (
+    'confirmation', 'correction', 'purchase', 'like', 'verified',
+    'contradiction', 'implicit_validation', 'user_action'
+  )),
+  target_type TEXT NOT NULL CHECK (target_type IN ('fact', 'cluster', 'node', 'event')),
+  target_id UUID NOT NULL,
+  weight FLOAT DEFAULT 1.0 CHECK (weight >= 0 AND weight <= 2.0),
+  source TEXT NOT NULL,
+  actor_id TEXT,
+  evidence JSONB DEFAULT '{}',
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX idx_signals_target ON validation_signals(target_type, target_id);
+CREATE INDEX idx_signals_type ON validation_signals(signal_type);
+Worker 4: Signal Processor (executa a cada 1-2 minutos)
+Fluxo:
+
+Buscar signals não processados (adicionar coluna processed na tabela)
+Para cada signal:
+A) Signals Positivos (confirmation, verified, purchase, like):
+
+python   if signal.target_type == 'fact':
+     UPDATE atomic_facts SET
+       confidence = LEAST(confidence + (signal.weight * 0.10), 1.0),
+       validation_count = validation_count + 1,
+       last_validated = NOW()
+     WHERE id = signal.target_id;
+   
+   elif signal.target_type == 'cluster':
+     UPDATE semantic_clusters SET
+       certainty = LEAST(certainty + (signal.weight * 0.15), 1.0),
+       importance = LEAST(importance + (signal.weight * 0.08), 1.0)
+     WHERE id = signal.target_id;
+   
+   elif signal.target_type == 'node':
+     UPDATE knowledge_nodes SET
+       certainty = LEAST(certainty + (signal.weight * 0.12), 1.0),
+       importance = LEAST(importance + (signal.weight * 0.10), 1.0)
+     WHERE id = signal.target_id;
+B) Signals Negativos (correction, contradiction):
+python   if signal.target_type == 'fact':
+     UPDATE atomic_facts SET
+       confidence = GREATEST(confidence - (signal.weight * 0.20), 0.0),
+       contradiction_count = contradiction_count + 1
+     WHERE id = signal.target_id;
+     
+     # Se confidence cair abaixo de 0.2, marcar para exclusão
+     if new_confidence < 0.2:
+       DELETE FROM atomic_facts WHERE id = signal.target_id;
+   
+   elif signal.target_type == 'cluster':
+     UPDATE semantic_clusters SET
+       certainty = GREATEST(certainty - (signal.weight * 0.25), 0.0),
+       importance = GREATEST(importance - (signal.weight * 0.15), 0.0)
+     WHERE id = signal.target_id;
+C) Signals de Correção com Novo Valor:
+python   if signal.signal_type == 'correction' and 'corrected_value' in signal.evidence:
+     # Criar novo fact correto
+     INSERT INTO atomic_facts (
+       subject, predicate, object, fact_type,
+       confidence, source_events, cluster_id, metadata
+     ) VALUES (
+       old_fact.subject,
+       old_fact.predicate,
+       signal.evidence['corrected_value'],
+       old_fact.fact_type,
+       0.9,  # Alta confidence inicial por ser correção explícita
+       old_fact.source_events,
+       old_fact.cluster_id,
+       jsonb_build_object(
+         'corrects_fact_id', old_fact.id,
+         'corrected_by', signal.actor_id,
+         'correction_source', signal.source
+       )
+     );
+     
+     # Marcar fact antigo como superseded
+     UPDATE atomic_facts SET
+       confidence = 0.0,
+       metadata = metadata || jsonb_build_object('superseded_by', new_fact_id)
+     WHERE id = old_fact.id;
+
+Cross-Validation Multi-Fonte (automático):
+Para facts sobre o mesmo subject/predicate:
+
+sql   SELECT 
+     subject, predicate, object,
+     COUNT(DISTINCT source_events) as source_count,
+     COUNT(DISTINCT cluster_id) as cluster_count,
+     AVG(confidence) as avg_confidence
+   FROM atomic_facts
+   WHERE confidence > 0.4
+   GROUP BY subject, predicate, object
+   HAVING COUNT(DISTINCT source_events) >= 2;
+Se ≥2 fontes confirmam mesmo fact:
+sql   UPDATE atomic_facts SET
+     confidence = LEAST(confidence * 1.3, 1.0),
+     metadata = metadata || jsonb_build_object('cross_validated', true)
+   WHERE subject = $1 AND predicate = $2 AND object = $3;
+```
+
+---
+
+### CAMADA 6: RETRIEVAL INTELIGENTE (API de Busca)
+
+**Endpoint:**
+```
+POST /api/v1/retrieve-context
+Payload:
+json{
+  "query": "User question or context query",
+  "conversation_thread": "thread_id",
+  "actor_id": "user_id",
+  "max_tokens": 4000,
+  "include_recent_messages": true,
+  "prioritize": "facts|summaries|both"
+}
+Fluxo COMPLETO (Multi-Stage Retrieval):
+STAGE 1 - Preparação:
+python# Gerar embeddings da query
+query_fingerprint = generate_fingerprint(query)  # 64D via PCA
+query_semantic = generate_embedding(query)  # 768D completo
+
+# Determinar orçamento de tokens
+token_budget = {
+  'facts': int(max_tokens * 0.30),      # 30% para facts
+  'clusters': int(max_tokens * 0.40),   # 40% para summaries
+  'recent': int(max_tokens * 0.30)      # 30% para mensagens recentes
+}
+used_tokens = 0
+STAGE 2 - Filtro Rápido (Fingerprint):
+python# Buscar no Qdrant usando fingerprint
+fingerprint_results = qdrant.search(
+  collection_name="fingerprints",
+  query_vector=query_fingerprint,
+  limit=100,
+  score_threshold=0.60  # Recall alto, threshold baixo
+)
+
+# Extrair IDs de clusters e nodes
+candidate_ids = {
+  'clusters': [r.payload['ref_id'] for r in fingerprint_results 
+               if r.payload['ref_type'] == 'cluster'],
+  'nodes': [r.payload['ref_id'] for r in fingerprint_results 
+            if r.payload['ref_type'] == 'node']
+}
+STAGE 3 - Refinamento Semântico:
+python# Buscar com embedding completo
+semantic_results = qdrant.search(
+  collection_name="semantic_vectors",
+  query_vector=query_semantic,
+  query_filter={
+    "$or": [
+      {"ref_id": {"$in": candidate_ids['clusters']}},
+      {"ref_id": {"$in": candidate_ids['nodes']}}
+    ]
+  },
+  limit=30,
+  score_threshold=0.78  # Precisão alta
+)
+
+# Buscar dados completos no PostgreSQL
+clusters = fetch_clusters_by_ids([r.payload['ref_id'] for r in semantic_results 
+                                   if r.payload['ref_type'] == 'cluster'])
+nodes = fetch_nodes_by_ids([r.payload['ref_id'] for r in semantic_results 
+                             if r.payload['ref_type'] == 'node'])
+STAGE 4 - Reranking (CRÍTICO):
+pythonfrom sentence_transformers import CrossEncoder
+
+reranker = CrossEncoder('cross-encoder/ms-marco-MiniLM-L-6-v2')
+
+# Preparar pares para rerank
+pairs = []
+sources = []
+
+for cluster in clusters:
+  pairs.append((query, cluster['short_summary']))
+  sources.append(('cluster', cluster))
+
+for node in nodes:
+  pairs.append((query, node['description']))
+  sources.append(('node', node))
+
+# Rerank
+if len(pairs) > 0:
+  rerank_scores = reranker.predict(pairs)
+  
+  # Ordenar por score
+  sorted_indices = np.argsort(rerank_scores)[::-1]  # Decrescente
+  
+  # Pegar top 15
+  top_sources = [(sources[i], rerank_scores[i]) for i in sorted_indices[:15]]
+STAGE 5 - Scoring Multi-Fatorial:
+pythondef calculate_final_score(item, rerank_score, item_type):
+  """
+  Combina múltiplos fatores para score final
+  """
+  # Fator base: rerank score
+  base_score = rerank_score
+  
+  # Fator de confiança/certeza
+  certainty = item.get('certainty', 0.5)
+  certainty_boost = certainty * 0.25
+  
+  # Fator de importância
+  importance = item.get('importance', 0.3)
+  importance_boost = importance * 0.20
+  
+  # Fator de recência (decay exponencial)
+  age_hours = (datetime.now() - item['last_updated']).total_seconds() / 3600
+  recency_boost = math.exp(-age_hours / 168) * 0.15  # Decay semanal
+  
+  # Boost se é do mesmo thread
+  thread_boost = 0.15 if item.get('conversation_threads') and \
+                         conversation_thread in item['conversation_threads'] else 0
+  
+  # Boost se é do mesmo actor
+  actor_boost = 0.10 if item.get('related_actors') and \
+                        actor_id in item['related_actors'] else 0
+  
+  # Score final
+  final_score = (base_score * 0.4) + certainty_boost + importance_boost + \
+                recency_boost + thread_boost + actor_boost
+  
+  return min(final_score, 1.0)
+
+# Aplicar scoring
+scored_items = []
+for (item_type,
+item), rerank_score in top_sources:
+final_score = calculate_final_score(item, rerank_score, item_type)
+scored_items.append((item_type, item, final_score))
+Ordenar por final_score
+scored_items.sort(key=lambda x: x[2], reverse=True)
+
+**STAGE 6 - Montagem do Contexto (Hierárquica por Prioridade):**
+```python
+context = {
+  'facts': [],
+  'summaries': [],
+  'recent_messages': []
+}
+
+# PRIORIDADE 1: Facts verificados (SEMPRE primeiro)
+for item_type, item, score in scored_items:
+  if used_tokens >= token_budget['facts']:
+    break
+  
+  if item_type == 'cluster' and item['facts_json']:
+    # Filtrar facts com alta confiança
+    verified_facts = [f for f in item['facts_json'] if f.get('confidence', 0) > 0.75]
+    
+    for fact in verified_facts:
+      fact_text = f"{fact['subject']} {fact['predicate']} {fact['object']}"
+      fact_tokens = estimate_tokens(fact_text)
+      
+      if used_tokens + fact_tokens <= token_budget['facts']:
+        context['facts'].append({
+          'text': fact_text,
+          'confidence': fact.get('confidence', 0.8),
+          'source': 'cluster',
+          'relevance_score': score
+        })
+        used_tokens += fact_tokens
+
+# PRIORIDADE 2: Summaries de clusters/nodes
+for item_type, item, score in scored_items:
+  if used_tokens >= token_budget['facts'] + token_budget['clusters']:
+    break
+  
+  summary = item.get('short_summary') or item.get('description', '')
+  if not summary:
+    continue
+  
+  summary_tokens = estimate_tokens(summary)
+  
+  if used_tokens + summary_tokens <= token_budget['facts'] + token_budget['clusters']:
+    context['summaries'].append({
+      'text': summary,
+      'title': item.get('title') or item.get('label', ''),
+      'type': item_type,
+      'certainty': item.get('certainty', 0.5),
+      'relevance_score': score
+    })
+    used_tokens += summary_tokens
+
+# PRIORIDADE 3: Mensagens recentes (apenas se sobrar espaço)
+if include_recent_messages and used_tokens < max_tokens * 0.9:
+  recent_messages = fetch_recent_messages(
+    conversation_thread=conversation_thread,
+    limit=20
+  )
+  
+  for msg in recent_messages:
+    msg_tokens = estimate_tokens(msg['content'])
+    
+    if used_tokens + msg_tokens <= max_tokens:
+      context['recent_messages'].append({
+        'content': msg['content'],
+        'actor_id': msg['actor_id'],
+        'created_at': msg['created_at']
+      })
+      used_tokens += msg_tokens
+    else:
+      break
+
+# STAGE 7 - Graph Traversal (Contexto Expandido via Relações)
+# Se ainda há espaço no token budget, buscar nodes conectados
+if used_tokens < max_tokens * 0.85:
+  # Pegar IDs dos nodes já incluídos
+  included_node_ids = [item['id'] for item_type, item, _ in scored_items 
+                       if item_type == 'node']
+  
+  # Buscar edges conectados
+  related_edges = fetch_edges_from_nodes(included_node_ids, limit=10)
+  
+  # Buscar nodes relacionados
+  for edge in related_edges:
+    related_node = fetch_node(edge['target_node'])
+    
+    if related_node and edge['weight'] > 0.7:
+      desc_tokens = estimate_tokens(related_node['description'])
+      
+      if used_tokens + desc_tokens <= max_tokens:
+        context['summaries'].append({
+          'text': related_node['description'],
+          'title': related_node['label'],
+          'type': 'node',
+          'certainty': related_node['certainty'],
+          'relevance_score': edge['weight'] * 0.8,  # Penalizar um pouco
+          'relation': edge['relation_type']
+        })
+        used_tokens += desc_tokens
+```
+
+**Response:**
+```json
+{
+  "context": {
+    "facts": [...],
+    "summaries": [...],
+    "recent_messages": [...]
+  },
+  "metadata": {
+    "total_tokens_used": 3456,
+    "token_budget": 4000,
+    "efficiency": 0.864,
+    "sources_count": {
+      "facts": 12,
+      "summaries": 8,
+      "messages": 15
+    },
+    "avg_confidence": 0.82,
+    "retrieval_time_ms": 287
+  }
+}
+```
+
+---
+
+### CAMADA 7: MAINTENANCE & MONITORING (Workers Periódicos)
+
+**Worker 5: Temporal Decay (executa diariamente às 2 AM)**
+```sql
+-- Decay em clusters
+UPDATE semantic_clusters
+SET 
+  recency_weight = recency_weight * 0.995,
+  importance = CASE 
+    WHEN certainty > 0.8 THEN importance * 0.998  -- Decay mais lento
+    ELSE importance * 0.990
+  END
+WHERE last_accessed < NOW() - INTERVAL '1 day';
+
+-- Decay em facts não validados
+UPDATE atomic_facts
+SET confidence = confidence * 0.997
+WHERE 
+  last_validated < NOW() - INTERVAL '7 days'
+  AND confidence > 0.2;
+
+-- Decay em edges
+UPDATE knowledge_edges
+SET weight = weight * 0.992
+WHERE 
+  last_reinforced < NOW() - INTERVAL '14 days'
+  AND weight > 0.1;
+
+-- Arquivar clusters irrelevantes
+INSERT INTO archived_clusters
+SELECT * FROM semantic_clusters
+WHERE 
+  importance < 0.05 
+  AND certainty < 0.3
+  AND last_accessed < NOW() - INTERVAL '90 days';
+
+DELETE FROM semantic_clusters
+WHERE 
+  importance < 0.05 
+  AND certainty < 0.3
+  AND last_accessed < NOW() - INTERVAL '90 days';
+```
+
+**Worker 6: Health Monitor (executa a cada 5 minutos)**
+```sql
+-- View para métricas
+CREATE OR REPLACE VIEW memory_health AS
+SELECT 
+  -- Taxa de erro (últimas 24h)
+  (SELECT COUNT(*) FROM validation_signals 
+   WHERE signal_type IN ('correction', 'contradiction') 
+     AND created_at > NOW() - INTERVAL '24 hours') * 100.0 / 
+  NULLIF((SELECT COUNT(*) FROM raw_events 
+          WHERE created_at > NOW() - INTERVAL '24 hours'), 0) AS error_rate_24h,
+  
+  -- Confiança média dos facts
+  (SELECT AVG(confidence) FROM atomic_facts 
+   WHERE extracted_at > NOW() - INTERVAL '7 days') AS avg_fact_confidence,
+  
+  -- Certeza média dos clusters
+  (SELECT AVG(certainty) FROM semantic_clusters 
+   WHERE last_updated > NOW() - INTERVAL '7 days') AS avg_cluster_certainty,
+  
+  -- Total de clusters ativos
+  (SELECT COUNT(*) FROM semantic_clusters 
+   WHERE importance > 0.3) AS active_clusters,
+  
+  -- Total de nodes no grafo
+  (SELECT COUNT(*) FROM knowledge_nodes) AS total_knowledge_nodes,
+  
+  -- Eventos processados hoje
+  (SELECT COUNT(*) FROM raw_events 
+   WHERE created_at > CURRENT_DATE) AS events_today,
+  
+  -- Facts cross-validados
+  (SELECT COUNT(*) FROM atomic_facts 
+   WHERE validation_count >= 2 AND confidence > 0.7) AS cross_validated_facts,
+  
+  -- Contradições pendentes
+  (SELECT COUNT(*) FROM contradiction_flags 
+   WHERE status = 'pending_review') AS pending_contradictions,
+  
+  -- Latência média de processamento (minutos)
+  (SELECT AVG(EXTRACT(EPOCH FROM (processed_at - created_at)) / 60) 
+   FROM raw_events 
+   WHERE processing_stage = 'clustered' 
+     AND processed_at > NOW() - INTERVAL '1 hour') AS avg_processing_latency_min;
+```
+
+**Alertas Automáticos:**
+```python
+def check_health_alerts():
+  health = fetch_memory_health()
+  
+  alerts = []
+  
+  # Alerta crítico: taxa de erro alta
+  if health['error_rate_24h'] > 0.01:  # >0.01% = 0.0001
+    alerts.append({
+      'level': 'CRITICAL',
+      'message': f"Error rate ({health['error_rate_24h']:.4f}%) exceeds 0.01% threshold",
+      'action': 'Review validation signals and contradiction flags'
+    })
+  
+  # Alerta warning: confiança baixa
+  if health['avg_fact_confidence'] < 0.6:
+    alerts.append({
+      'level': 'WARNING',
+      'message': f"Average fact confidence ({health['avg_fact_confidence']:.2f}) below 0.6",
+      'action': 'Review fact extraction prompts and thresholds'
+    })
+  
+  # Alerta info: contradições acumuladas
+  if health['pending_contradictions'] > 50:
+    alerts.append({
+      'level': 'INFO',
+      'message': f"{health['pending_contradictions']} contradictions pending review",
+      'action': 'Schedule manual review session'
+    })
+  
+  return alerts
+```
+
+**Endpoint de monitoramento:**
+GET /api/v1/health
+GET /api/v1/health/metrics
+GET /api/v1/health/alerts
+
+---
+
+## CONFIGURAÇÃO DE DEPLOY (Docker Compose)
+
+**docker-compose.yml estrutura:**
+```yaml
+version: '3.8'
+
+services:
+  # PostgreSQL
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: unibloom_memory
+      POSTGRES_USER: unibloom
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U unibloom"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Qdrant (Vector Database)
+  qdrant:
+    image: qdrant/qdrant:latest
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - qdrant_data:/qdrant/storage
+    environment:
+      QDRANT__SERVICE__GRPC_PORT: 6334
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:6333/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Redis (Cache & Queue)
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # API Service
+  api:
+    build:
+      context: ./api
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      DATABASE_URL: postgresql://unibloom:${POSTGRES_PASSWORD}@postgres:5432/unibloom_memory
+      QDRANT_URL: http://qdrant:6333
+      REDIS_URL: redis://redis:6379
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      # Ou para embeddings locais:
+      # EMBEDDING_MODEL: local
+      # EMBEDDING_MODEL_PATH: /models/paraphrase-multilingual-mpnet-base-v2
+    depends_on:
+      postgres:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./models:/models  # Para modelos locais
+    restart: unless-stopped
+
+  # Worker: Embedding Generator
+  worker-embeddings:
+    build:
+      context: ./workers
+      dockerfile: Dockerfile
+    command: python worker_embeddings.py
+    environment:
+      DATABASE_URL: postgresql://unibloom:${POSTGRES_PASSWORD}@postgres:5432/unibloom_memory
+      QDRANT_URL: http://qdrant:6333
+      REDIS_URL: redis://redis:6379
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      WORKER_INTERVAL: 60  # segundos
+    depends_on:
+      - postgres
+      - qdrant
+      - redis
+    restart: unless-stopped
+
+  # Worker: Cluster Associator
+  worker-clustering:
+    build:
+      context: ./workers
+      dockerfile: Dockerfile
+    command: python worker_clustering.py
+    environment:
+      DATABASE_URL: postgresql://unibloom:${POSTGRES_PASSWORD}@postgres:5432/unibloom_memory
+      QDRANT_URL: http://qdrant:6333
+      REDIS_URL: redis://redis:6379
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      WORKER_INTERVAL: 120  # segundos
+    depends_on:
+      - postgres
+      - qdrant
+      - redis
+    restart: unless-stopped
+
+  # Worker: Consolidator
+  worker-consolidation:
+    build:
+      context: ./workers
+      dockerfile: Dockerfile
+    command: python worker_consolidation.py
+    environment:
+      DATABASE_URL: postgresql://unibloom:${POSTGRES_PASSWORD}@postgres:5432/unibloom_memory
+      QDRANT_URL: http://qdrant:6333
+      REDIS_URL: redis://redis:6379
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      WORKER_INTERVAL: 600  # 10 minutos
+    depends_on:
+      - postgres
+      - qdrant
+      - redis
+    restart: unless-stopped
+
+  # Worker: Signal Processor
+  worker-signals:
+    build:
+      context: ./workers
+      dockerfile: Dockerfile
+    command: python worker_signals.py
+    environment:
+      DATABASE_URL: postgresql://unibloom:${POSTGRES_PASSWORD}@postgres:5432/unibloom_memory
+      REDIS_URL: redis://redis:6379
+      WORKER_INTERVAL: 90  # segundos
+    depends_on:
+      - postgres
+      - redis
+    restart: unless-stopped
+
+  # Scheduler (Cron jobs)
+  scheduler:
+    build:
+      context: ./scheduler
+      dockerfile: Dockerfile
+    environment:
+      DATABASE_URL: postgresql://unibloom:${POSTGRES_PASSWORD}@postgres:5432/unibloom_memory
+    depends_on:
+      - postgres
+    restart: unless-stopped
+    # Agenda:
+    # - Temporal decay: diário às 2 AM
+    # - Health check: a cada 5 minutos
+    # - Backup: diário às 3 AM
+
+volumes:
+  postgres_data:
+  qdrant_data:
+  redis_data:
+```
+
+---
+
+## ESTRUTURA DE PASTAS DO PROJETO
+unibloom-memory/
+├── docker-compose.yml
+├── .env.example
+├── README.md
+│
+├── api/
+│   ├── Dockerfile
+│   ├── requirements.txt
+│   ├── main.py
+│   ├── routes/
+│   │   ├── ingest.py
+│   │   ├── retrieve.py
+│   │   ├── signals.py
+│   │   └── health.py
+│   ├── models/
+│   │   ├── database.py
+│   │   └── schemas.py
+│   └── utils/
+│       ├── embeddings.py
+│       ├── qdrant_client.py
+│       └── redis_client.py
+│
+├── workers/
+│   ├── Dockerfile
+│   ├── requirements.txt
+│   ├── worker_embeddings.py
+│   ├── worker_clustering.py
+│   ├── worker_consolidation.py
+│   ├── worker_signals.py
+│   └── shared/
+│       ├── database.py
+│       ├── embeddings.py
+│       ├── reranker.py
+│       └── utils.py
+│
+├── scheduler/
+│   ├── Dockerfile
+│   ├── requirements.txt
+│   ├── cron_scheduler.py
+│   └── jobs/
+│       ├── temporal_decay.py
+│       ├── health_monitor.py
+│       └── backup.py
+│
+├── database/
+│   ├── init.sql
+│   └── migrations/
+│
+└── models/  # Para embeddings locais (opcional)
+└── paraphrase-multilingual-mpnet-base-v2/
+
+---
+
+## DEPENDÊNCIAS PYTHON (requirements.txt)
+```txt
+# Web Framework
+fastapi==0.109.0
+uvicorn[standard]==0.27.0
+pydantic==2.5.3
+
+# Database
+psycopg2-binary==2.9.9
+sqlalchemy==2.0.25
+asyncpg==0.29.0
+
+# Vector Database
+qdrant-client==1.7.3
+
+# Cache & Queue
+redis==5.0.1
+
+# ML & Embeddings
+openai==1.12.0
+sentence-transformers==2.3.1
+transformers==4.37.2
+torch==2.1.2
+
+# Utilities
+numpy==1.26.3
+python-dotenv==1.0.1
+httpx==0.26.0
+tenacity==8.2.3  # Retry logic
+APScheduler==3.10.4  # Scheduling
+
+# Monitoring
+prometheus-client==0.19.0
+
+# Logging
+loguru==0.7.2
+```
+
+---
+
+## CONFIGURAÇÕES CRÍTICAS
+
+### 1. PCA para Fingerprints
+
+**Treinar PCA uma única vez com dataset representativo:**
+```python
+# scripts/train_pca.py
+from sklearn.decomposition import PCA
+import pickle
+import numpy as np
+
+# Gerar embeddings de amostra (10k+ exemplos variados)
+sample_texts = load_diverse_sample_texts(10000)
+sample_embeddings = generate_embeddings_batch(sample_texts)  # 768D
+
+# Treinar PCA
+pca = PCA(n_components=64)
+pca.fit(sample_embeddings)
+
+# Salvar modelo
+with open('models/pca_768_to_64.pkl', 'wb') as f:
+  pickle.dump(pca, f)
+
+print(f"Explained variance ratio: {pca.explained_variance_ratio_.sum():.4f}")
+# Target: > 0.85 (85% da informação preservada)
+```
+
+**Usar PCA em produção:**
+```python
+# utils/embeddings.py
+import pickle
+
+# Carregar PCA treinado
+with open('models/pca_768_to_64.pkl', 'rb') as f:
+  pca_model = pickle.load(f)
+
+def generate_fingerprint(full_embedding):
+  """
+  Comprime embedding 768D -> 64D via PCA
+  Mantém topologia semântica
+  """
+  fingerprint = pca_model.transform([full_embedding])[0]
+  return fingerprint.tolist()
+```
+
+### 2. Reranker Cross-Encoder
+```python
+# utils/reranker.py
+from sentence_transformers import CrossEncoder
+
+# Inicializar modelo (fazer uma vez no início)
+reranker = CrossEncoder('cross-encoder/ms-marco-MiniLM-L-6-v2')
+
+def rerank_candidates(query: str, candidates: list[str]) -> list[float]:
+  """
+  Rerank candidatos usando cross-encoder
+  
+  Args:
+    query: Query do usuário
+    candidates: Lista de textos candidatos
+    
+  Returns:
+    Lista de scores de relevância [0-1]
+  """
+  pairs = [(query, candidate) for candidate in candidates]
+  scores = reranker.predict(pairs)
+  return scores.tolist()
+```
+
+### 3. Embeddings (Local vs API)
+
+**Opção A - OpenAI API:**
+```python
+from openai import OpenAI
+
+client = OpenAI(api_key=os.getenv('OPENAI_API_KEY'))
+
+def generate_embedding(text: str) -> list[float]:
+  response = client.embeddings.create(
+    input=text,
+    model="text-embedding-3-large",
+    dimensions=768  # Usar 768D para reduzir custo
+  )
+  return response.data[0].embedding
+```
+
+**Opção B - Local (Sentence Transformers):**
+```python
+from sentence_transformers import SentenceTransformer
+
+# Carregar modelo local
+model = SentenceTransformer('paraphrase-multilingual-mpnet-base-v2')
+
+def generate_embedding(text: str) -> list[float]:
+  embedding = model.encode(text, normalize_embeddings=True)
+  return embedding.tolist()
+```
+
+**Recomendação:** Usar OpenAI para produção (qualidade) e local para desenvolvimento/testes.
+
+### 4. Thresholds Configuráveis
+```python
+# config.py
+class MemoryConfig:
+  # Fingerprint search
+  FINGERPRINT_THRESHOLD = 0.65  # Recall alto
+  FINGERPRINT_LIMIT = 20
+  
+  # Semantic search
+  SEMANTIC_THRESHOLD = 0.82  # Precisão alta
+  SEMANTIC_LIMIT = 10
+  
+  # Reranker
+  RERANK_THRESHOLD = 0.85  # Decisão final
+  
+  # Fact extraction
+  FACT_MIN_CONTENT_LENGTH = 30
+  FACT_MAX_PER_EVENT = 5
+  FACT_CONFIDENCE_THRESHOLD = 0.4
+  
+  # Clustering
+  CLUSTER_PROMOTION_IMPORTANCE = 0.7
+  CLUSTER_PROMOTION_CERTAINTY = 0.75
+  CLUSTER_PROMOTION_ACCESS_COUNT = 30
+  
+  # Cross-validation
+  CROSS_VALIDATION_MIN_SOURCES = 2
+  CROSS_VALIDATION_CONFIDENCE_BOOST = 1.3
+  
+  # Contradiction
+  CONTRADICTION_HIGH_CONFIDENCE_THRESHOLD = 0.7
+  CONTRADICTION_PENALTY = 0.7  # Multiplier
+  
+  # Decay
+  CLUSTER_RECENCY_DECAY = 0.995  # Daily
+  CLUSTER_IMPORTANCE_DECAY = 0.990  # Daily
+  FACT_CONFIDENCE_DECAY = 0.997  # Weekly
+  EDGE_WEIGHT_DECAY = 0.992  # Biweekly
+  
+  # Token budgets
+  TOKEN_BUDGET_FACTS = 0.30  # 30% do total
+  TOKEN_BUDGET_SUMMARIES = 0.40  # 40% do total
+  TOKEN_BUDGET_MESSAGES = 0.30  # 30% do total
+```
+
+---
+
+## TESTES E VALIDAÇÃO
+
+### 1. Teste de Taxa de Erro
+```python
+# tests/test_error_rate.py
+import pytest
+from datetime import datetime, timedelta
+
+def test_error_rate_target():
+  """
+  Verifica se taxa de erro está abaixo de 0.01%
+  """
+  # Buscar signals de erro (últimas 24h)
+  error_signals = count_validation_signals(
+    signal_types=['correction', 'contradiction'],
+    since=datetime.now() - timedelta(hours=24)
+  )
+  
+  # Buscar total de eventos processados
+  total_events = count_raw_events(
+    since=datetime.now() - timedelta(hours=24)
+  )
+  
+  if total_events == 0:
+    pytest.skip("No events in last 24h")
+  
+  error_rate = (error_signals / total_events) * 100
+  
+  assert error_rate < 0.01, f"Error rate {error_rate:.4f}% exceeds 0.01% target"
+```
+
+### 2. Teste de Retrieval
+```python
+def test_retrieval_precision():
+  """
+  Testa se retrieval retorna contexto relevante
+  """
+  test_queries = [
+    ("Qual é o time do usuário?", ["flamengo", "futebol"]),
+    ("Qual a comida favorita?", ["pizza", "italiana"]),
+    ("Onde ele mora?", ["brasília", "df"])
+  ]
+  
+  for query, expected_keywords in test_queries:
+    context = retrieve_context(query, actor_id="test_user")
+    
+    # Verificar se pelo menos 1 keyword aparece
+    context_text = " ".join([
+      f['text'] for f in context['facts']
+    ] + [
+      s['text'] for s in context['summaries']
+    ]).lower()
+    
+    assert any(kw in context_text for kw in expected_keywords), \
+      f"Query '{query}' didn't retrieve expected keywords"
+```
+
+### 3. Teste de Contradição
+```python
+def test_contradiction_detection():
+  """
+  Testa se sistema detecta contradições
+  """
+  # Inserir fact inicial
+  fact1_id = create_fact(
+    subject="user_123",
+    predicate="likes",
+    object="pizza",
+    confidence=0.8
+  )
+  
+  # Inserir fact contraditório
+  fact2_id = create_fact(
+    subject="user_123",
+    predicate="likes",
+    object="burger",  # Diferente!
+    confidence=0.7
+  )
+  
+  # Aguardar worker processar
+  time.sleep(5)
+  
+  # Verificar se contradição foi detectada
+  contradictions = fetch_contradiction_flags(
+    fact_ids=[fact1_id, fact2_id]
+  )
+  
+  assert len(contradictions) > 0, "Contradiction not detected"
+  assert contradictions[0]['status'] == 'pending_review'
+```
+
+---
+
+## MÉTRICAS DE SUCESSO
+
+**Meta: <0.01% erro em 30 dias**
+
+**Semana 1 (Aprendizado):**
+- Taxa de erro esperada: ~0.5-1.0%
+- Foco: Coletar validation signals
+- Ação: Ajustar thresholds baseado em feedback
+
+**Semana 2-3 (Ajuste):**
+- Taxa de erro esperada: ~0.1-0.3%
+- Foco: Cross-validation automática começando
+- Ação: Refinar prompts de extração
+
+**Semana 4+ (Maturidade):**
+- Taxa de erro esperada: <0.01%
+- Foco: Sistema auto-corrigindo
+- Ação: Monitoramento passivo
+
+**KPIs:**
+- `error_rate_24h < 0.01`
+- `avg_fact_confidence > 0.75`
+- `avg_cluster_certainty > 0.70`
+- `cross_validated_facts > 40% do total`
+- `pending_contradictions < 50`
+- `avg_processing_latency < 5 min`
+- `retrieval_time < 300ms`
+
+---
+
+## OBSERVAÇÕES FINAIS CRÍTICAS
+
+1. **PCA é MANDATÓRIO** - Não usar sampling ingênuo para fingerprints
+2. **Reranker é ESSENCIAL** - Não tomar decisões apenas com fingerprint
+3. **Contradictions MUST be handled** - Sistema deve detectar e resolver automaticamente
+4. **Cross-validation é KEY** - Facts confirmados por múltiplas fontes têm boost
+5. **Thresholds devem ser AJUSTÁVEIS** - Não hardcode, use config
+6. **Monitoring é VITAL** - Implementar dashboard desde dia 1
+7. **Testing é OBRIGATÓRIO** - Testes automatizados de taxa de erro
+8. **Logging detalhado** - Cada decisão deve ser rastreável
+9. **Docker compose COMPLETO** - Sistema deve subir com um comando
+10. **Documentation em código** - Docstrings em todas as funções
+
+---
+
+**ESTE PROMPT CONTÉM A ARQUITETURA COMPLETA E DEFINITIVA.**
+
+**Nada foi deixado de fora. Cada detalhe crítico foi especificado.**
+
+**O sistema resultante será:**
+- ✅ Independente e self-contained
+- ✅ Deployável via Docker
+- ✅ Capaz de <0.01% erro
+- ✅ Escalável e performático
+- ✅ Auditável e monitorável

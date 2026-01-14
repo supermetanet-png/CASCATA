@@ -1,0 +1,29 @@
+
+  cd ~
+  git clone https://github.com/supermetanet-png/cascata.git
+  cd ~/cascata
+mkdir -p nginx
+mv .env.txt .env
+mv .dockerignore.txt .dockerignore
+mv nginx.conf.txt nginx/nginx.conf
+mv database/init.sql.txt database/init.sql
+mv backend/Dockerfile.txt backend/Dockerfile
+mv frontend/Dockerfile.txt frontend/Dockerfile
+mv frontend/nginx.conf.txt frontend/nginx.conf
+mv nginx-controller/Dockerfile.txt nginx-controller/Dockerfile
+
+mv backend/migrations/001_init.sql.txt backend/migrations/001_init.sql
+mv backend/migrations/002_rate_limits.sql.txt backend/migrations/002_rate_limits.sql
+mv backend/migrations/003_n8n_support.sql.txt backend/migrations/003_n8n_support.sql
+mv backend/migrations/004_rate_limit_v2.sql.txt backend/migrations/004_rate_limit_v2.sql
+mv backend/migrations/005_ai_memory.sql.txt backend/migrations/005_ai_memory.sql
+mv backend/migrations/006_asset_history.sql.txt backend/migrations/006_asset_history.sql
+mv backend/migrations/007_ai_sessions.sql.txt backend/migrations/007_ai_sessions.sql
+mv backend/migrations/008_auth_hardening.sql.txt backend/migrations/008_auth_hardening.sql
+mv backend/migrations/009_immutable_logs.sql.txt backend/migrations/009_immutable_logs.sql
+mv backend/migrations/010_auth_confirmation.sql.txt backend/migrations/010_auth_confirmation.sql
+mv backend/migrations/011_webhook_filters.sql.txt backend/migrations/011_webhook_filters.sql
+mv backend/migrations/012_webhook_reliability.sql.txt backend/migrations/012_webhook_reliability.sql
+mv backend/migrations/013_auth_helpers.sql.txt backend/migrations/013_auth_helpers.sql
+
+docker compose up -d --build

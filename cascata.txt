@@ -1,0 +1,52 @@
+
+# 🌊 CASCATA: Orquestrador de Infraestrutura BaaS Enterprise
+
+## 1. Visão Geral e Propósito
+O **Cascata** é uma plataforma de **Backend-as-a-Service (BaaS) Multi-Tenant Auto-Hospedável**, projetada para oferecer uma alternativa robusta, soberana e de alto desempenho a serviços como Supabase ou Firebase para gerenciar varios banco de dados. 
+
+Diferente de soluções que focam apenas em prototipagem rápida, o Cascata foi construído com uma mentalidade **"Production-First"**. Seu propósito fundamental é fornecer uma infraestrutura de dados completa (Banco de Dados, Autenticação, Storage, Edge Functions e Realtime) que pode ser instalada em qualquer VPS ou servidor on-premise, garantindo **Soberania de Dados** total e **Isolamento Rígido** entre projetos.
+
+## 2. A Ambição
+A ambição do Cascata é ser o **"Sistema Operacional para Backends Modernos"**. Ele visa eliminar a complexidade de configurar e manter stacks de dados isoladas, transformando tarefas complexas de DevOps (como gestão de SSL, roteamento dinâmico, backup e segurança de API) em funcionalidades de "um clique".
+
+O projeto busca preencher a lacuna entre ferramentas No-Code/Low-Code (como FlutterFlow e AppSmith, com as quais possui compatibilidade nativa via especificações OpenAPI/Swagger geradas automaticamente) e o desenvolvimento High-Code tradicional, oferecendo poder total do PostgreSQL sem as amarras de fornecedores proprietários (No Vendor Lock-in).
+
+## 3. Público-Alvo
+*   **Engenheiros de Software e Arquitetos:** Que precisam de um backend PostgreSQL robusto com APIs instantâneas (REST/RPC) e segurança granular (RLS).
+*   **Agências e Desenvolvedores Low-Code:** Usuários de FlutterFlow, WeWeb e AppSmith que necessitam de um backend escalável, documentado e fácil de integrar.
+*   **Empresas Enterprise & Setor Regulado:** Organizações que não podem usar nuvens públicas compartilhadas por questões de compliance e necessitam de dados em infraestrutura própria com logs de auditoria imutáveis.
+*   **DevOps:** Profissionais que buscam orquestrar múltiplos ambientes de desenvolvimento/produção de forma centralizada.
+
+## 4. A Solução Técnica (Arquitetura)
+
+O Cascata opera sob uma arquitetura de **Planos Separados**, garantindo que a gestão não interfira na performance dos dados:
+
+### A. Control Plane (O Cérebro)
+Responsável pelo ciclo de vida dos projetos, gestão de segredos, certificados SSL (via integração com Let's Encrypt/Certbot e Nginx Controller), e configurações globais. Ele orquestra a criação de bancos de dados isolados e gerencia a segurança administrativa.
+
+### B. Data Plane (O Motor)
+A superfície de API de alta performance que serve os dados dos projetos.
+*   **PostgreSQL Nativo:** Uso extensivo de schemas, `pgcrypto` para criptografia, e `uuid-ossp`.
+*   **Auto-API (PostgREST Style):** Transforma automaticamente tabelas e funções SQL em endpoints REST seguros e documentados.
+*   **Isolamento Zero-Trust:** Cada requisição passa por um pipeline rigoroso de resolução de projeto, rate limiting (Redis), firewall de aplicação (WAF) e troca de contexto de role no banco de dados.
+*   **Edge Functions (V8 Isolado):** Um ambiente de execução server-side seguro (`isolated-vm`) que permite rodar JavaScript/TypeScript com acesso controlado ao banco e à rede, similar a Cloudflare Workers ou AWS Lambda, mas rodando na própria infraestrutura.
+*   **Storage Engine Híbrido:** Gerenciamento de arquivos agnóstico (Local Disk, S3 Compatible, Cloudinary) com governança de tipos e tamanhos de arquivo.
+
+### C. Camada de Inteligência (Cascata Architect)
+Um assistente de IA integrado (powered by Gemini) que atua como um Arquiteto Sênior. Ele é capaz de:
+*   Gerar schemas SQL complexos e políticas de segurança (RLS) via chat ou voz.
+*   Corrigir erros de SQL automaticamente ("Self-Healing").
+*   Escrever documentação técnica e guias de integração para as tabelas criadas.
+
+## 5. Diferenciais Competitivos e Recursos Chave
+
+1.  **Soberania de Dados (.CAF):** O sistema introduz o *Cascata Archive Format*, um formato de backup criptográfico que permite exportar e importar projetos inteiros (Schema, Dados, Storage e Metadados) entre instâncias, garantindo portabilidade total.
+2.  **Segurança "Hardened":**
+    *   **Panic Mode:** Um interruptor de emergência baseado em Redis que bloqueia instantaneamente todo o tráfego externo em caso de ataque.
+    *   **Smart Lockout:** Proteção contra força bruta em autenticação.
+    *   **Logs Imutáveis:** Logs de auditoria protegidos por triggers de banco que impedem alteração ou exclusão não autorizada.
+3.  **Observabilidade Profunda:** Um "Logs Hub" integrado que oferece visão de raio-X sobre cada requisição (latência, IP, user-agent, payload), com capacidade de bloqueio de IP (Firewall) com um clique.
+4.  **Autenticação Flexível:** Suporte nativo a JWT, com provedores OAuth (Google, GitHub), Magic Links, OTP e compatibilidade com o protocolo GoTrue (Supabase Auth).
+
+## 6. Meta
+Tornar-se a referência padrão de mercado para **Infraestrutura de Dados Self-Hosted**, provando que é possível ter a experiência de desenvolvedor (DX) das grandes nuvens com a privacidade e controle de um servidor local.
