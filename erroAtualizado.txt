@@ -1,31 +1,31 @@
- ✔ Image edoburu/pgbouncer:latest     Pulled                                                                                                      3.3s 
- ✔ Image redis:7-alpine               Pulled                                                                                                      4.7s 
- ✔ Image qdrant/qdrant:latest         Pulled                                                                                                      8.3s 
- ✔ Image nginx:alpine                 Pulled                                                                                                      5.7s 
- ✔ Image postgres:15-alpine           Pulled                                                                                                      9.6s 
- ✔ Image cascata-backend_control      Built                                                                                                     154.3s 
- ✔ Image cascata-nginx_controller     Built                                                                                                     154.3s 
- ✔ Image cascata-frontend             Built                                                                                                     154.3s 
- ✔ Image cascata-backend_data         Built                                                                                                     154.3s 
+ ✔ Image postgres:15-alpine           Pulled                                                                                                      9.7s 
+ ✔ Image qdrant/qdrant:latest         Pulled                                                                                                      8.9s 
+ ✔ Image edoburu/pgbouncer:latest     Pulled                                                                                                      3.7s 
+ ✔ Image nginx:alpine                 Pulled                                                                                                      5.4s 
+ ✔ Image redis:7-alpine               Pulled                                                                                                      5.1s 
+ ✔ Image cascata-nginx_controller     Built                                                                                                     122.9s 
+ ✔ Image cascata-backend_data         Built                                                                                                     122.9s 
+ ✔ Image cascata-frontend             Built                                                                                                     122.9s 
+ ✔ Image cascata-backend_control      Built                                                                                                     122.9s 
  ✔ Network cascata_cascata_data       Created                                                                                                     0.0s 
- ✔ Network cascata_cascata_app        Created                                                                                                     0.0s 
- ✔ Network cascata_cascata_public     Created                                                                                                     0.0s 
+ ✔ Network cascata_cascata_public     Created                                                                                                     0.1s 
+ ✔ Network cascata_cascata_app        Created                                                                                                     0.1s 
+ ✔ Volume cascata_nginx_dynamic       Created                                                                                                     0.0s 
+ ✔ Volume cascata_redis_storage       Created                                                                                                     0.0s 
+ ✔ Volume cascata_certs               Created                                                                                                     0.0s 
+ ✔ Volume cascata_storage_data        Created                                                                                                     0.0s 
  ✔ Volume cascata_temp_data           Created                                                                                                     0.0s 
+ ✔ Volume cascata_qdrant_storage      Created                                                                                                     0.0s 
  ✔ Volume cascata_pgdata              Created                                                                                                     0.0s 
  ✔ Volume cascata_acme_challenge      Created                                                                                                     0.0s 
- ✔ Volume cascata_certs               Created                                                                                                     0.0s 
- ✔ Volume cascata_nginx_dynamic       Created                                                                                                     0.0s 
- ✔ Volume cascata_qdrant_storage      Created                                                                                                     0.0s 
- ✔ Volume cascata_redis_storage       Created                                                                                                     0.0s 
- ✔ Volume cascata_storage_data        Created                                                                                                     0.0s 
- ✔ Container cascata-redis            Healthy                                                                                                    12.1s 
- ✔ Container cascata-db               Healthy                                                                                                     8.1s 
- ✘ Container cascata-qdrant           Error dependency qdrant failed to start                                                                    52.6s 
- ✔ Container cascata-nginx-controller Created                                                                                                     0.6s 
- ✔ Container cascata-frontend         Created                                                                                                     0.6s 
+ ✘ Container cascata-qdrant           Error dependency qdrant failed to start                                                                    52.2s 
+ ✔ Container cascata-redis            Healthy                                                                                                    11.7s 
+ ✔ Container cascata-nginx-controller Created                                                                                                     0.5s 
+ ✔ Container cascata-db               Healthy                                                                                                     7.7s 
+ ✔ Container cascata-frontend         Created                                                                                                     0.5s 
  ✔ Container cascata-pgbouncer        Created                                                                                                     0.1s 
- ✔ Container cascata-backend-control  Created                                                                                                     0.1s 
- ✔ Container cascata-backend-data     Created                                                                                                     0.1s 
+ ✔ Container cascata-backend-control  Created                                                                                                     0.2s 
+ ✔ Container cascata-backend-data     Created                                                                                                     0.2s 
  ✔ Container cascata-nginx            Created                                                                                                     0.1s 
 dependency failed to start: container cascata-qdrant is unhealthy
 ubuntu@ip-172-26-3-173:~/cascata$ docker logs cascata-qdrant
@@ -39,14 +39,36 @@ ubuntu@ip-172-26-3-173:~/cascata$ docker logs cascata-qdrant
 Version: 1.16.3, build: bd49f45a
 Access web UI at http://localhost:6333/dashboard
 
-2026-01-14T01:12:28.757615Z  INFO storage::content_manager::consensus::persistent: Initializing new raft state at ./storage/raft_state.json
-2026-01-14T01:12:28.795869Z  INFO qdrant: Distributed mode disabled
-2026-01-14T01:12:28.795980Z  INFO qdrant: Telemetry reporting disabled
-2026-01-14T01:12:28.970858Z  INFO qdrant::actix: TLS disabled for REST API
-2026-01-14T01:12:28.973689Z  INFO qdrant::actix: Qdrant HTTP listening on 6333
-2026-01-14T01:12:28.973884Z  INFO actix_server::builder: starting 1 workers
-2026-01-14T01:12:28.973991Z  INFO actix_server::server: Actix runtime found; starting in Actix runtime
-2026-01-14T01:12:28.974116Z  INFO actix_server::server: starting service: "actix-web-service-0.0.0.0:6333", workers: 1, listening on: 0.0.0.0:6333
-2026-01-14T01:12:28.979150Z  INFO qdrant::tonic: Qdrant gRPC listening on 6334
-2026-01-14T01:12:28.979251Z  INFO qdrant::tonic: TLS disabled for gRPC API
-ubuntu@ip-172-26-3-173:~/cascata$ 
+2026-01-14T01:28:22.591942Z  INFO storage::content_manager::consensus::persistent: Initializing new raft state at ./storage/raft_state.json
+2026-01-14T01:28:22.636219Z  INFO qdrant: Distributed mode disabled
+2026-01-14T01:28:22.636336Z  INFO qdrant: Telemetry reporting disabled
+2026-01-14T01:28:22.856613Z  INFO qdrant::actix: TLS disabled for REST API
+2026-01-14T01:28:22.860352Z  INFO qdrant::actix: Qdrant HTTP listening on 6333
+2026-01-14T01:28:22.860645Z  INFO actix_server::builder: starting 1 workers
+2026-01-14T01:28:22.860751Z  INFO actix_server::server: Actix runtime found; starting in Actix runtime
+2026-01-14T01:28:22.860894Z  INFO actix_server::server: starting service: "actix-web-service-0.0.0.0:6333", workers: 1, listening on: 0.0.0.0:6333
+2026-01-14T01:28:22.866270Z  INFO qdrant::tonic: Qdrant gRPC listening on 6334
+2026-01-14T01:28:22.866499Z  INFO qdrant::tonic: TLS disabled for gRPC API
+ubuntu@ip-172-26-3-173:~/cascata$ docker logs cascata-qdrantdocker logs -f cascata-qdrant
+^C
+ubuntu@ip-172-26-3-173:~/cascata$ docker logs -f cascata-qdrant
+           _                 _    
+  __ _  __| |_ __ __ _ _ __ | |_  
+ / _` |/ _` | '__/ _` | '_ \| __| 
+| (_| | (_| | | | (_| | | | | |_  
+ \__, |\__,_|_|  \__,_|_| |_|\__| 
+    |_|                           
+
+Version: 1.16.3, build: bd49f45a
+Access web UI at http://localhost:6333/dashboard
+
+2026-01-14T01:28:22.591942Z  INFO storage::content_manager::consensus::persistent: Initializing new raft state at ./storage/raft_state.json
+2026-01-14T01:28:22.636219Z  INFO qdrant: Distributed mode disabled
+2026-01-14T01:28:22.636336Z  INFO qdrant: Telemetry reporting disabled
+2026-01-14T01:28:22.856613Z  INFO qdrant::actix: TLS disabled for REST API
+2026-01-14T01:28:22.860352Z  INFO qdrant::actix: Qdrant HTTP listening on 6333
+2026-01-14T01:28:22.860645Z  INFO actix_server::builder: starting 1 workers
+2026-01-14T01:28:22.860751Z  INFO actix_server::server: Actix runtime found; starting in Actix runtime
+2026-01-14T01:28:22.860894Z  INFO actix_server::server: starting service: "actix-web-service-0.0.0.0:6333", workers: 1, listening on: 0.0.0.0:6333
+2026-01-14T01:28:22.866270Z  INFO qdrant::tonic: Qdrant gRPC listening on 6334
+2026-01-14T01:28:22.866499Z  INFO qdrant::tonic: TLS disabled for gRPC API

@@ -1,0 +1,85 @@
+
+================================================================================
+          RELATÓRIO DE ARQUITETURA: A SIMBIOSE QDRANT <> CASCATA
+          ASSUNTO: TOPOLOGIA DE PERSISTÊNCIA E INTUIÇÃO VETORIAL
+          STATUS: DOCUMENTAÇÃO DE REFERÊNCIA (STAFF LEVEL)
+================================================================================
+
+No ecossistema Cheshire Memory v7, a relação entre o Cascata (PostgreSQL) e o 
+Qdrant (Vector Database) não é de redundância, mas de simbiose funcional. 
+Seguindo a metáfora do "Gato de Cheshire", o Cascata é o CORPO (estático, 
+rígido, histórico) e o Qdrant é o SORRISO (fluido, intuitivo, latente).
+
+1. CASCATA (POSTGRESQL): O DEPÓSITO DA VERDADE ESTRUTURADA
+--------------------------------------------------------------------------------
+O Cascata (VPS 2) é o "Single Source of Truth" (Fonte Única da Verdade). Ele 
+armazena os dados que exigem precisão cirúrgica e lógica relacional.
+
+O QUE ARMAZENA:
+- Fatos Atômicos (Triadas SPO): O Sujeito, Predicado e Objeto em texto puro.
+- Grafo de Conhecimento: As arestas (edges) que conectam um fato a outro, 
+  pesos de importância e contadores de interação.
+- Metadados de Governança: Confidence scores, Gravity (importância), 
+  Plutchik Index (emoções), flags de Scarring (cicatrizes) e timestamps.
+- Segurança (RLS): O Row Level Security garante que o Projeto A nunca veja 
+  os fatos do Projeto B.
+
+FUNÇÃO NO SISTEMA:
+- Validação Lógica: Decidir se um fato novo contradiz um antigo.
+- Recuperação de Vizinhos: Atravessar o grafo para achar conexões que a 
+  busca vetorial pura pode ignorar.
+- Persistência de Longo Prazo: O "Inconsciente Digital" reside aqui.
+
+2. QDRANT: O ESPAÇO LATENTE DA INTUIÇÃO
+--------------------------------------------------------------------------------
+O Qdrant (VPS 2) é o motor de busca semântica. Ele não "entende" os fatos; ele 
+entende a "distância" entre conceitos no espaço multidimensional.
+
+O QUE ARMAZENA (NAMED VECTORS):
+- core_2048 (A Essência): Vetores de alta dimensão gerados pelo 
+  text-embedding-3-large. Captura nuances, ironia e contexto profundo.
+- shadow_128 (O Vulto): Vetores de baixa dimensão gerados via PCA/SVD 
+  treinado localmente. Serve para filtragem ultra-rápida.
+- Metadata Payloads: Armazena apenas o `fact_id` e o `project_id` para 
+  servir de ponte com o Cascata.
+
+FUNÇÃO NO SISTEMA:
+- Fast Path Retrieval: Encontrar em milissegundos os 100 fatos que mais se 
+  parecem com a dúvida atual do usuário.
+- Semantic Clustering: Agrupar memórias por afinidade temática sem precisar 
+  de tags ou categorias pré-definidas.
+
+3. O PROTOCOLO DE SINCRONIA (A PONTE SINÁPTICA)
+--------------------------------------------------------------------------------
+A relação é baseada em IDs Compartilhados. Cada `fact_id` no Cascata tem um 
+ponto (`point`) correspondente no Qdrant com o mesmo ID.
+
+FLUXO DE INGESTÃO:
+1. O Cheshire (VPS 3) gera o fato.
+2. O fato é salvo no Cascata (Postgres) como 'pending'.
+3. O Cheshire gera o embedding (2048D) e projeta o vulto (128D).
+4. O vetor é enviado ao Qdrant via Proxy.
+5. Após o OK do Qdrant, o Cascata marca o fato como 'synced'.
+
+FLUXO DE RECUPERAÇÃO (THE ORACLE):
+1. STAGE 1 (INTUIÇÃO): O sistema pergunta ao Qdrant: "Quais IDs são próximos 
+   desta query?". O Qdrant retorna uma lista de IDs em <20ms.
+2. STAGE 2 (RAZÃO): O sistema vai ao Cascata e diz: "Me dê o texto e os 
+   metadados reais para estes IDs".
+3. STAGE 3 (EXPANSÃO): O Cascata usa o Grafo para injetar fatos vizinhos 
+   que o Qdrant não "viu" mas que são logicamente ligados.
+
+4. SOBERANIA E O ARQUIVO .CAF
+--------------------------------------------------------------------------------
+O arquivo .CAF (Cascata Archive Format) é o "Snapshot da Alma". Ele une:
+- O Dump do Postgres (O Grafo e a Lógica).
+- O Snapshot do Qdrant (Os Vetores e a Intuição).
+
+Sem o Qdrant, o sistema é um bibliotecário que sabe tudo mas não tem 
+criatividade (precisa de palavras exatas). Sem o Cascata, o sistema é um 
+sonhador que tem intuições mas não tem fatos (pode alucinar). Juntos, eles 
+formam o Cheshire Memory System.
+
+================================================================================
+"O Cascata garante que não esqueçamos. O Qdrant garante que lembremos rápido."
+================================================================================

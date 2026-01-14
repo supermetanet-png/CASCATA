@@ -1,4 +1,3 @@
-
 import React, { useState, useEffect } from 'react';
 import { 
   Shield, Globe, Key, Lock, Mail, CheckCircle2, AlertCircle, Loader2, Cloud, 
@@ -24,7 +23,8 @@ const SystemSettings: React.FC = () => {
   // AI STATE
   const [aiConfig, setAiConfig] = useState({ 
       api_key: '', 
-      model: 'gemini-2.5-flash', 
+      // Fix: Updated default model to gemini-3-flash-preview according to guidelines
+      model: 'gemini-3-flash-preview', 
       base_url: 'https://generativelanguage.googleapis.com/v1beta/openai',
       wake_word: 'Cascata',
       active_listening: false
@@ -568,7 +568,7 @@ const SystemSettings: React.FC = () => {
                           <input 
                             value={aiConfig.model} 
                             onChange={(e) => setAiConfig({...aiConfig, model: e.target.value})} 
-                            placeholder="gemini-2.5-flash"
+                            placeholder="gemini-3-flash-preview"
                             className="w-full bg-slate-50 border border-slate-100 rounded-[1.8rem] py-5 px-8 text-sm font-bold text-slate-900 outline-none focus:ring-4 focus:ring-indigo-500/10 transition-all" 
                           />
                       </div>

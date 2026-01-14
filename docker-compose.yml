@@ -193,8 +193,9 @@ services:
         soft: 65535
         hard: 65535
     healthcheck:
-      # O Qdrant expõe o status em /healthz. Usamos um probe de socket TCP como fallback infalível.
-      test: ["CMD-SHELL", "printf 'GET /healthz HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n' > /dev/tcp/127.0.0.1/6333 || exit 1"]
+      # Simplificado para curl, endpoint padrão do Qdrant. 
+      # Resolve o erro de container unhealthy matando o deploy.
+      test: ["CMD", "curl", "-f", "http://localhost:6333/health"]
       interval: 10s
       timeout: 5s
       retries: 5
